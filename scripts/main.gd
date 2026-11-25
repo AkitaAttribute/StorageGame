@@ -3,12 +3,14 @@ extends Node
 const Saves = preload("res://scripts/save_store.gd")
 const FACILITY := "res://assets/facility.glb"
 const UNIT := "res://assets/unit.glb"
-const CHARACTER := "res://assets/player.glb"
+const CHARACTER := "res://assets/locomotion.glb"
 const AVATAR := "res://assets/shino.glb"
 const HumanoidRetarget = preload("res://scripts/humanoid_retarget.gd")
-const SPEED := 3.4
+const SPEED := 1.85
 const REACH := 2.0
-const STEP_HEIGHT := 0.32
+const STEP_HEIGHT := 0.44
+const STEP_PRESENTATION_RATE := 1.8
+const STEP_EDGE_REACH := 0.27
 const STEP_MARGIN := 0.002
 const CAMERA_DISTANCE := 7.96
 const CAMERA_SENSITIVITY := 0.004
@@ -17,7 +19,10 @@ var camera_pitch := 0.50
 var camera_target := Vector3.ZERO
 var camera_touch := -1
 var camera_mouse_paused := false
-var camera_distance := CAMERA_DISTANCE
+var visual_step_offset := 0.0
+var avatar_model: Node3D
+var avatar_base_y := 0.0
+var foot_offset := 0.0
 var movement_joystick: Control
 var stepped_last_frame := false
 var state: Dictionary = {}
@@ -179,6 +184,7 @@ func start_game(data: Dictionary) -> void:
     player.add_child(visual)
     var donor := model(CHARACTER, visual)
     var avatar := model(AVATAR, visual)
+    avatar_model = avatar
     # The original VRM 0.x model faces -Z, while the game uses +Z forward.
     avatar.rotation.y = PI
     var bounds := model_bounds(avatar)
@@ -186,6 +192,7 @@ func start_game(data: Dictionary) -> void:
         var factor := 1.7 / bounds.size.y
         avatar.scale = Vector3.ONE * factor
         avatar.position.y = -bounds.position.y * factor
+    avatar_base_y = avatar.position.y
     retargeter = HumanoidRetarget.new()
     avatar_ready = retargeter.setup(donor, avatar, visual)
     donor.visible = not avatar_ready
@@ -193,10 +200,12 @@ func start_game(data: Dictionary) -> void:
     if not avatar_ready:
         push_error("Avatar retarget failed; showing the original character.")
     animator = animation_in(donor)
-    walk = named_animation(animator, "walking_a")
+    walk = named_animation(animator, "walk_loop")
     if walk == &"":
         walk = named_animation(animator, "walk")
-    idle = named_animation(animator, "idle")
+    idle = named_animation(animator, "idle_loop")
+    if idle == &"":
+        idle = named_animation(animator, "idle")
     if animator != null:
         for clip in [walk, idle]:
             if clip != &"":
@@ -386,23 +395,14 @@ func _input(event: InputEvent) -> void:
         get_viewport().set_input_as_handled()
 
 func update_camera(delta: float) -> void:
-    var target := player.position + Vector3.UP
+    var target := player.position + Vector3.UP + Vector3.UP * visual_step_offset
     if delta <= 0.0:
         camera_target = target
     else:
         camera_target = camera_target.lerp(target, 1.0 - exp(-delta * 14.0))
     var offset := Vector3(0.0, sin(camera_pitch), cos(camera_pitch)).rotated(Vector3.UP, camera_yaw)
-    var desired := camera_target + offset * CAMERA_DISTANCE
-    var query := PhysicsRayQueryParameters3D.create(camera_target, desired, player.collision_mask, [player.get_rid()])
-    var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
-    var available := CAMERA_DISTANCE
-    if not hit.is_empty():
-        available = maxf(0.25, camera_target.distance_to(hit["position"]) - 0.18)
-    if available < camera_distance or delta <= 0.0:
-        camera_distance = available
-    else:
-        camera_distance = lerpf(camera_distance, available, 1.0 - exp(-delta * 8.0))
-    camera.position = camera_target + offset * camera_distance
+    # Keep a fixed orbit radius even when a wall is between camera and player.
+    camera.position = camera_target + offset * CAMERA_DISTANCE
     camera.look_at(camera_target)
 
 # Step up only when grounded, blocked by an obstacle, and a capsule sweep
@@ -422,22 +422,41 @@ func try_step_up(body: CharacterBody3D, motion: Vector3) -> bool:
         return false
     var raised := start
     raised.origin += rise
-    # Probe far enough beyond a riser's rounded capsule contact to find
-    # its horizontal tread, rather than getting stuck on its sharp edge.
-    var forward := motion.normalized() * maxf(motion.length(), 0.18)
-    if body.test_move(raised, forward, null, STEP_MARGIN):
+    # Advance exactly the requested movement, never a larger probe distance.
+    if body.test_move(raised, motion, null, STEP_MARGIN):
         return false
     var ahead := raised
-    ahead.origin += forward
+    ahead.origin += motion
     var landing := KinematicCollision3D.new()
-    if not body.test_move(ahead, -Vector3.UP * (STEP_HEIGHT + 0.06), landing, STEP_MARGIN):
-        return false
-    if landing.get_normal().dot(Vector3.UP) < cos(body.floor_max_angle):
+    var down := -Vector3.UP * (STEP_HEIGHT + 0.08)
+    var collided := body.test_move(ahead, down, landing, STEP_MARGIN)
+    if not collided:
         return false
     var destination := ahead.origin + landing.get_travel()
+    # A capsule meeting the edge of a tread may report an angled contact
+    # instead of the actual horizontal landing. Probe the leading edge,
+    # but do not move the body horizontally to that probe position.
+    if landing.get_normal().dot(Vector3.UP) < cos(body.floor_max_angle):
+        var edge := ahead.origin + motion.normalized() * STEP_EDGE_REACH
+        var query := PhysicsRayQueryParameters3D.create(edge + Vector3.UP * 0.02, edge + down, body.collision_mask, [body.get_rid()])
+        var hit := body.get_world_3d().direct_space_state.intersect_ray(query)
+        if hit.is_empty() or Vector3(hit["normal"]).dot(Vector3.UP) < cos(body.floor_max_angle):
+            return false
+        var surface: Vector3 = hit["position"]
+        var target_y := surface.y + STEP_MARGIN
+        var edge_descent := Vector3.UP * (target_y - ahead.origin.y)
+        if edge_descent.y > 0.0:
+            return false
+        var clearance := KinematicCollision3D.new()
+        if body.test_move(ahead, edge_descent, clearance, STEP_MARGIN):
+            if clearance.get_travel().distance_to(edge_descent) > 0.012:
+                return false
+        destination = Vector3(ahead.origin.x, target_y, ahead.origin.z)
     var height := destination.y - start.origin.y
     if height <= 0.005 or height > STEP_HEIGHT + STEP_MARGIN:
         return false
+    destination.x = ahead.origin.x
+    destination.z = ahead.origin.z
     body.global_position = destination
     return true
 
@@ -447,6 +466,7 @@ func _physics_process(delta: float) -> void:
     var input := Input.get_vector("move_left", "move_right", "move_up", "move_down")
     var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw)
     var grounded := player.is_on_floor() or stepped_last_frame
+    var previous_position := player.position
     player.velocity.x = direction.x * SPEED
     player.velocity.z = direction.z * SPEED
     if not grounded:
@@ -462,19 +482,31 @@ func _physics_process(delta: float) -> void:
     if grounded and not player.is_on_floor() and player.velocity.y <= 0.0:
         player.apply_floor_snap()
     stepped_last_frame = stepped
+    var height_change := player.position.y - previous_position.y
+    if grounded and absf(height_change) > 0.025:
+        visual_step_offset = clampf(visual_step_offset - height_change, -0.30, 0.30)
+    visual_step_offset = move_toward(visual_step_offset, 0.0, STEP_PRESENTATION_RATE * delta)
+    visual.position.y = visual_step_offset
     player.position.x = clampf(player.position.x, -29, 29)
     player.position.z = clampf(player.position.z, -29, 29)
     if player.position.y < -5:
         player.position = Vector3(-10.4, 0.1, 5)
+        visual_step_offset = 0.0
+        visual.position.y = 0.0
     if direction.length() > 0.05:
         visual.rotation.y = lerp_angle(visual.rotation.y, atan2(direction.x, direction.z), minf(1.0, delta * 14.0))
     if animator != null:
-        var clip := walk if direction.length() > 0.05 else idle
+        var displacement := player.position - previous_position
+        var ground_speed := Vector2(displacement.x, displacement.z).length() / maxf(delta, 0.001)
+        var clip := walk if ground_speed > 0.08 and direction.length() > 0.05 else idle
         if clip != &"" and animator.current_animation != clip:
             animator.play(clip, 0.12)
-        animator.advance(delta)
+        var playback := clampf(ground_speed / SPEED, 0.45, 1.10) if clip == walk else 1.0
+        animator.advance(delta * playback)
         if avatar_ready:
             retargeter.apply_pose()
+            foot_offset = lerpf(foot_offset, retargeter.foot_ground_correction(), 1.0 - exp(-delta * 24.0))
+            avatar_model.position.y = avatar_base_y + foot_offset
     update_camera(delta)
     update_nearby()
     if Input.is_action_just_pressed("use"):
@@ -630,11 +662,26 @@ func _smoke() -> void:
         push_error("Step-up passed through a tall wall")
         get_tree().quit(1)
         return
+    # Check that a step cannot move the capsule farther than the requested
+    # horizontal displacement and that a compound top lip is also climbable.
+    wall(fixture, Vector3(1.4, 0.22, 0), Vector3(0.6, 0.44, 2))
+    probe.position = Vector3(0.84, 0.203, 0)
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    if not try_step_up(probe, Vector3(0.40, 0, 0)) or probe.position.y < 0.38 or probe.position.x > 1.241:
+        push_error("Top landing or horizontal step distance regression")
+        get_tree().quit(1)
+        return
     fixture.queue_free()
     var original_yaw := camera_yaw
     orbit_camera(Vector2(100, 50))
     if is_equal_approx(original_yaw, camera_yaw):
         push_error("Camera orbit regression")
+        get_tree().quit(1)
+        return
+    update_camera(0.0)
+    if not is_equal_approx(camera.position.distance_to(camera_target), CAMERA_DISTANCE):
+        push_error("Camera orbit radius regression")
         get_tree().quit(1)
         return
     save_game()

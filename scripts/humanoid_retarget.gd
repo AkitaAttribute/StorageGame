@@ -9,6 +9,8 @@ var source_basis := Basis.IDENTITY
 var target_basis := Basis.IDENTITY
 var corrections: Dictionary = {}
 var target_keys: Dictionary = {}
+var target_scale := 1.0
+var rest_foot_height := 0.0
 
 const CORE := ["hips", "spine", "head", "leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm", "leftHand", "rightHand", "leftUpperLeg", "rightUpperLeg", "leftLowerLeg", "rightLowerLeg", "leftFoot", "rightFoot"]
 const BODY := {
@@ -27,7 +29,7 @@ const LIMBS := {
     "UpperLeg": ["upperleg", "thigh", "upleg", "femur"],
     "LowerLeg": ["lowerleg", "shin", "calf", "leg", "knee"],
     "Foot": ["foot", "ankle"],
-    "Toes": ["toes", "toe", "toebase"],
+    "Toes": ["toes", "toe", "toebase", "ball"],
 }
 const CHILD := {
     "hips": "spine", "spine": "chest", "chest": "neck", "upperChest": "neck", "neck": "head",
@@ -76,7 +78,9 @@ func setup(donor: Node3D, avatar: Node3D, character: Node3D) -> bool:
     if source == null or target == null:
         return false
     source_basis = (character.global_transform.affine_inverse() * source.global_transform).basis.orthonormalized()
-    target_basis = (character.global_transform.affine_inverse() * target.global_transform).basis.orthonormalized()
+    var target_transform := character.global_transform.affine_inverse() * target.global_transform
+    target_basis = target_transform.basis.orthonormalized()
+    target_scale = target_transform.basis.get_scale().y
     for key in BODY:
         add_pair(key, source_id(BODY[key]))
     for side in ["left", "right"]:
@@ -93,6 +97,18 @@ func setup(donor: Node3D, avatar: Node3D, character: Node3D) -> bool:
     if not missing.is_empty():
         push_error("Retarget missing required humanoid bones: " + str(missing))
         return false
+    # Align the donor's anatomical left/right axis to the avatar's.
+    var sl: int = pairs[target_keys["leftUpperLeg"]]
+    var sr: int = pairs[target_keys["rightUpperLeg"]]
+    var tl: int = target_keys["leftUpperLeg"]
+    var tr: int = target_keys["rightUpperLeg"]
+    var source_side := source_basis * (source.get_bone_global_rest(sl).origin - source.get_bone_global_rest(sr).origin)
+    var target_side := target_basis * (target.get_bone_global_rest(tl).origin - target.get_bone_global_rest(tr).origin)
+    source_side.y = 0.0
+    target_side.y = 0.0
+    if source_side.length_squared() > 0.000001 and target_side.length_squared() > 0.000001:
+        source_basis = Basis(Vector3.UP, source_side.signed_angle_to(target_side, Vector3.UP)) * source_basis
+    rest_foot_height = lowest_foot(true)
     # Match arm/leg rest directions as well as rest-space joint turns. This
     # prevents a T-pose avatar from keeping its arms straight out when the
     # donor's neutral pose has arms down.
@@ -113,19 +129,40 @@ func apply_pose() -> void:
     if source == null or target == null:
         return
     source.force_update_all_bone_transforms()
-    # Skeleton bone indices are parent-first on imported glTF skin trees.
+    # Compute current parent bases explicitly in hierarchy order, so child
+    # rotations never depend on stale transforms from a previous frame.
+    var global_bases: Array[Basis] = []
     for dst in range(target.get_bone_count()):
-        if not pairs.has(dst):
-            continue
-        var src: int = pairs[dst]
-        var rest_source := source.get_bone_global_rest(src).basis.orthonormalized()
-        var posed_source := source.get_bone_global_pose(src).basis.orthonormalized()
-        var delta_common := source_basis * posed_source * rest_source.inverse() * source_basis.inverse()
-        var correction: Basis = corrections.get(dst, Basis.IDENTITY)
-        var rest_target := target.get_bone_global_rest(dst).basis.orthonormalized()
-        var desired := target_basis.inverse() * delta_common * correction * target_basis * rest_target
         var parent := target.get_bone_parent(dst)
-        if parent >= 0:
-            desired = target.get_bone_global_pose(parent).basis.orthonormalized().inverse() * desired
-        target.set_bone_pose_rotation(dst, desired.orthonormalized().get_rotation_quaternion())
+        var parent_basis := Basis.IDENTITY if parent < 0 else global_bases[parent]
+        if pairs.has(dst):
+            var src: int = pairs[dst]
+            var rest_source := source.get_bone_global_rest(src).basis.orthonormalized()
+            var posed_source := source.get_bone_global_pose(src).basis.orthonormalized()
+            var delta_common := source_basis * posed_source * rest_source.inverse() * source_basis.inverse()
+            var correction: Basis = corrections.get(dst, Basis.IDENTITY)
+            var rest_target := target.get_bone_global_rest(dst).basis.orthonormalized()
+            var desired := target_basis.inverse() * delta_common * correction * target_basis * rest_target
+            var local := parent_basis.inverse() * desired
+            target.set_bone_pose_rotation(dst, local.orthonormalized().get_rotation_quaternion())
+        var current := Basis(target.get_bone_pose_rotation(dst))
+        global_bases.append((parent_basis * current).orthonormalized())
     target.force_update_all_bone_transforms()
+
+func lowest_foot(rest: bool) -> float:
+    var height := INF
+    for key in ["leftFoot", "rightFoot", "leftToes", "rightToes"]:
+        if not target_keys.has(key):
+            continue
+        var i: int = target_keys[key]
+        var pose := target.get_bone_global_rest(i) if rest else target.get_bone_global_pose(i)
+        height = minf(height, (target_basis * pose.origin).y * target_scale)
+    return height
+
+func foot_ground_correction() -> float:
+    var current := lowest_foot(false)
+    if not is_finite(current) or not is_finite(rest_foot_height):
+        return 0.0
+    # Maintain the lowest support foot at its calibrated rest height without
+    # forcing the swinging foot down. This is root grounding, not full foot IK.
+    return clampf(rest_foot_height - current, -0.24, 0.24)

@@ -17,7 +17,7 @@ MODELS = {
     "facility.glb": ("https://cdn.3dassets.dev/assets/34733/v1/model.glb", 897836, None),
     "unit.glb": ("https://cdn.3dassets.dev/assets/34694/v1/model.glb", 26452, None),
     "shino.glb": ("https://raw.githubusercontent.com/madjin/vrm-samples/e16eb187100149a315ad92c3c9968f1d5baa6c7d/vroid/beta/Sendagaya_Shino.vrm", 15074328, "91f7c9e9ec990efb9de305e4c1d0e32a46498830"),
-    "player.glb": ("https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0/672074b73ba276876a19e8816ecdc5241817ab47/addons/kaykit_character_pack_adventures/Characters/gltf/Rogue.glb", 3616284, "c8827661105eef7b2bfbef3bc676d41a47625733"),
+    "locomotion.glb": ("https://raw.githubusercontent.com/call-me-sensei-app/toonlab/2e354c52e5539e33fb3d8f339645b47e1ac937ca/public/characters/mannequin.glb", 6670948, "82ee8dd0bf8007d40572e74c5c70bd4c65cc484d"),
 }
 for filename, (url, size, git_sha) in MODELS.items():
     path = CACHE / filename
@@ -41,7 +41,7 @@ for filename, (url, size, git_sha) in MODELS.items():
     names = [a.get("name", "") for a in doc.get("animations", [])]
     if filename == "unit.glb" and not {"open", "close"}.issubset(names):
         raise RuntimeError("Unit door animations missing")
-    if filename == "player.glb" and (not doc.get("skins") or not any("walk" in n.lower() for n in names)):
+    if filename == "locomotion.glb" and (not doc.get("skins") or not any("walk" in n.lower() for n in names)):
         raise RuntimeError("Player rig or walk animation missing")
     print(filename, len(data), "animations:", names)
 
@@ -78,8 +78,8 @@ for filename, (url, size, git_sha) in MODELS.items():
         target.write_bytes(struct.pack("<4sIIII", b"glTF", 2, 20 + len(payload) + len(rest), len(payload), 0x4E4F534A) + payload + rest)
         print("Shino humanoid bones:", [item["bone"] for item in human])
         continue
-    if filename == "player.glb":
-        print("KayKit skin joint names:", [[doc["nodes"][i].get("name") for i in skin["joints"]] for skin in doc["skins"]])
+    if filename == "locomotion.glb":
+        print("Locomotion skin joint names:", [[doc["nodes"][i].get("name") for i in skin["joints"]] for skin in doc["skins"]])
     if "KHR_mesh_quantization" in doc.get("extensionsUsed", []) or "KHR_mesh_quantization" in doc.get("extensionsRequired", []):
         npx = shutil.which("npx.cmd" if __import__("os").name == "nt" else "npx")
         if not npx:
