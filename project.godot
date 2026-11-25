@@ -1,0 +1,31 @@
+; StorageGame
+config_version=5
+
+[application]
+config/name="Storage Game"
+config/version="0.1.0"
+run/main_scene="res://main.tscn"
+run/max_fps=60
+
+[autoload]
+UpdateManager="*res://scripts/update_manager.gd"
+
+[display]
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/size/window_width_override=1280
+window/size/window_height_override=720
+window/stretch/mode="canvas_items"
+window/handheld/orientation=4
+window/vsync/vsync_mode=0
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+gl_compatibility/driver.windows="opengl3"
+textures/vram_compression/import_etc2_astc=true
+environment/defaults/default_clear_color=Color(0.55,0.65,0.75,1)
+
+[input_devices]
+pointing/emulate_touch_from_mouse=false
+pointing/emulate_mouse_from_touch=true
