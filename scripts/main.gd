@@ -218,7 +218,7 @@ func make_unit(id: String, at: Vector3) -> void:
     unit.name = id
     world.add_child(unit)
     unit.position = at
-    unit.rotation.y = -PI / 2.0
+    unit.rotation.y = PI / 2.0
     var asset := model(UNIT, unit)
     var ap := animation_in(asset)
     wall(unit, Vector3(-1.45, 1.2, 0), Vector3(0.12, 2.4, 3.0))
@@ -330,7 +330,7 @@ func _physics_process(delta: float) -> void:
     player.position.x = clampf(player.position.x, -29, 29)
     player.position.z = clampf(player.position.z, -29, 29)
     if player.position.y < -5:
-        player.position = Vector3(-12, 0.1, 5)
+        player.position = Vector3(-10.4, 0.1, 5)
     if direction.length() > 0.05:
         visual.rotation.y = lerp_angle(visual.rotation.y, atan2(direction.x, direction.z), minf(1.0, delta * 14.0))
     if animator != null:
@@ -426,6 +426,11 @@ func _smoke() -> void:
     var saved := Saves.read_slot(str(initial["id"]))
     if saved.is_empty() or saved["position"].size() != 3:
         push_error("Save round trip failed")
+        get_tree().quit(1)
+        return
+    var second := Saves.new_slot()
+    if second["id"] == initial["id"] or not Saves.write_slot(second) or Saves.read_slot(str(second["id"])).is_empty() or Saves.read_slot(str(initial["id"])).is_empty():
+        push_error("Independent save slots failed")
         get_tree().quit(1)
         return
     nearby = 0

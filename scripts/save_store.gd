@@ -36,7 +36,7 @@ static func latest() -> Dictionary:
 
 static func new_slot() -> Dictionary:
     var id := "%d-%s" % [Time.get_ticks_usec(), Crypto.new().generate_random_bytes(12).hex_encode()]
-    return {"schema": SCHEMA, "id": id, "position": [-12.0, 0.1, 5.0], "rotation": 0.0, "doors": {}, "updated": Time.get_unix_time_from_system()}
+    return {"schema": SCHEMA, "id": id, "position": [-10.4, 0.1, 5.0], "rotation": 0.0, "doors": {}, "updated": Time.get_unix_time_from_system()}
 
 static func write_slot(state: Dictionary) -> bool:
     var id := str(state.get("id", ""))
