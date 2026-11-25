@@ -9,7 +9,7 @@ Minimal Godot 4.7.1 storage-facility exploration prototype, based on the SpaceMi
 
 New Game creates an independent save slot; Continue resumes the most recently saved valid slot. Autosave every two seconds, on door interaction, and when the app loses focus or pauses. Player position, facing and animated door states are stored in user://saves. There is no save-slot selection UI yet.
 
-Windows: WASD to move; E when near an interactive shutter. Android: SpaceMinerGame's fixed lower-right joystick; context button above it, landscape orientation. Drag with either mouse button on Windows or swipe an unused area of the Android screen to orbit the third-person camera horizontally and vertically. Movement is relative to the camera. Camera orientation persists in each save. Small steps and stair risers up to 0.32 m are traversable using collision-checked step-up and floor snapping.
+Windows: WASD to move; E when near an interactive shutter. Android: SpaceMinerGame's fixed lower-right joystick; context button above it, landscape orientation. Move the mouse freely (no mouse button required) on Windows or swipe an unused area of the Android screen to orbit the third-person camera horizontally and vertically. Windows captures the cursor automatically when gameplay starts; Escape releases or recaptures it. Movement is relative to the camera. Camera orientation persists in each save. Small steps and stair risers up to 0.32 m are traversable using collision-checked step-up and floor snapping.
 
 The downloaded starter facility is static; the four additional units on its west side are independently animated with wall and door collisions. Character is KayKit Rogue, a free rigged humanoid; see assets/README.md.
 

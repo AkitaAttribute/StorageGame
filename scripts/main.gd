@@ -14,7 +14,7 @@ var camera_yaw := 0.0
 var camera_pitch := 0.50
 var camera_target := Vector3.ZERO
 var camera_touch := -1
-var camera_mouse := false
+var camera_mouse_paused := false
 var camera_distance := CAMERA_DISTANCE
 var movement_joystick: Control
 var stepped_last_frame := false
@@ -200,6 +200,8 @@ func start_game(data: Dictionary) -> void:
     camera_target = player.position + Vector3.UP
     update_camera(0.0)
     create_hud()
+    if not mobile and DisplayServer.get_name() != "headless":
+        Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
     save_game()
 
 func add_static_mesh_collisions(node: Node) -> void:
@@ -356,10 +358,11 @@ func _input(event: InputEvent) -> void:
             orbit_camera(event.relative)
             get_viewport().set_input_as_handled()
         return
-    if event is InputEventMouseButton and (event.button_index == MOUSE_BUTTON_LEFT or event.button_index == MOUSE_BUTTON_RIGHT):
-        camera_mouse = event.pressed
+    if event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_ESCAPE:
+        camera_mouse_paused = not camera_mouse_paused
+        Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if camera_mouse_paused else Input.MOUSE_MODE_CAPTURED
         get_viewport().set_input_as_handled()
-    elif event is InputEventMouseMotion and camera_mouse:
+    elif event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
         orbit_camera(event.relative)
         get_viewport().set_input_as_handled()
 
@@ -520,7 +523,10 @@ func save_game() -> void:
 func _notification(what: int) -> void:
     if what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_APPLICATION_PAUSED:
         camera_touch = -1
-        camera_mouse = false
+        if not mobile and is_instance_valid(player):
+            Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+    if what == NOTIFICATION_APPLICATION_FOCUS_IN and not mobile and is_instance_valid(player) and not camera_mouse_paused and DisplayServer.get_name() != "headless":
+        Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
     if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
         save_game()
     if what == NOTIFICATION_WM_GO_BACK_REQUEST and is_instance_valid(player):
