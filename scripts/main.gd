@@ -26,7 +26,7 @@ var world: Node3D
 var player: CharacterBody3D
 var visual: Node3D
 var animator: AnimationPlayer
-var retargeter: RefCounted
+var retargeter: HumanoidRetarget
 var avatar_ready := false
 var walk: StringName
 var idle: StringName
