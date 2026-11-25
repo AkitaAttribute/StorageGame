@@ -80,6 +80,8 @@ func model(path: String, parent: Node3D) -> Node3D:
     return instance
 
 func animation_in(node: Node) -> AnimationPlayer:
+    if node == null:
+        return null
     if node is AnimationPlayer:
         return node
     for child in node.get_children():
@@ -104,7 +106,7 @@ func start_game(data: Dictionary) -> void:
     if is_instance_valid(world):
         return
     for path in [FACILITY, UNIT, CHARACTER]:
-        if not ResourceLoader.exists(path):
+        if not (ResourceLoader.load(path) is PackedScene):
             OS.alert("Run python tools/fetch_assets.py and import the project first.", "Missing model assets")
             return
     state = data.duplicate(true)
@@ -183,6 +185,8 @@ func start_game(data: Dictionary) -> void:
     save_game()
 
 func add_static_mesh_collisions(node: Node) -> void:
+    if node == null:
+        return
     if node is MeshInstance3D and node.mesh != null:
         node.create_trimesh_collision()
     for child in node.get_children():

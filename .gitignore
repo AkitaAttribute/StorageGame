@@ -6,3 +6,5 @@ assets/*.glb.import
 custom-template/
 godot-src/
 .scons_cache/
+
+.asset-cache/

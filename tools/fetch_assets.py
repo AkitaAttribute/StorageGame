@@ -3,18 +3,23 @@ import hashlib
 import json
 import pathlib
 import struct
+import shutil
+import subprocess
 import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "assets"
 ASSETS.mkdir(exist_ok=True)
+CACHE = ROOT / ".asset-cache"
+CACHE.mkdir(exist_ok=True)
+(CACHE / ".gdignore").touch()
 MODELS = {
     "facility.glb": ("https://cdn.3dassets.dev/assets/34733/v1/model.glb", 897836, None),
     "unit.glb": ("https://cdn.3dassets.dev/assets/34694/v1/model.glb", 26452, None),
     "player.glb": ("https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0/672074b73ba276876a19e8816ecdc5241817ab47/addons/kaykit_character_pack_adventures/Characters/gltf/Rogue.glb", 3616284, "c8827661105eef7b2bfbef3bc676d41a47625733"),
 }
 for filename, (url, size, git_sha) in MODELS.items():
-    path = ASSETS / filename
+    path = CACHE / filename
     def valid(data):
         return (len(data) == size and data[:4] == b"glTF" and
                 (git_sha is None or hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest() == git_sha))
@@ -38,3 +43,23 @@ for filename, (url, size, git_sha) in MODELS.items():
     if filename == "player.glb" and (not doc.get("skins") or not any("walk" in n.lower() for n in names)):
         raise RuntimeError("Player rig or walk animation missing")
     print(filename, len(data), "animations:", names)
+
+    target = ASSETS / filename
+    if "KHR_mesh_quantization" in doc.get("extensionsUsed", []) or "KHR_mesh_quantization" in doc.get("extensionsRequired", []):
+        npx = shutil.which("npx.cmd" if __import__("os").name == "nt" else "npx")
+        if not npx:
+            raise RuntimeError("Node.js and npx are required to convert the facility models for Godot.")
+        temp = ASSETS / (filename + ".converted.glb")
+        subprocess.run([npx, "--yes", "@gltf-transform/cli@4.5.1", "dequantize", str(path), str(temp)], check=True)
+        converted = temp.read_bytes()
+        length, kind = struct.unpack_from("<II", converted, 12)
+        converted_doc = json.loads(converted[20:20+length])
+        if kind != 0x4E4F534A or "KHR_mesh_quantization" in converted_doc.get("extensionsRequired", []) or "KHR_mesh_quantization" in converted_doc.get("extensionsUsed", []):
+            raise RuntimeError(f"Conversion did not remove mesh quantization: {filename}")
+        converted_names = {a.get("name", "") for a in converted_doc.get("animations", [])}
+        if not set(names).issubset(converted_names):
+            raise RuntimeError(f"Conversion lost animations: {filename}")
+        temp.replace(target)
+        print("Godot-compatible model:", target.name, len(converted))
+    else:
+        shutil.copyfile(path, target)
