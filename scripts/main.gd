@@ -400,10 +400,13 @@ func try_step_up(body: CharacterBody3D, motion: Vector3) -> bool:
         return false
     var raised := start
     raised.origin += rise
-    if body.test_move(raised, motion, null, STEP_MARGIN):
+    # Probe far enough beyond a riser's rounded capsule contact to find
+    # its horizontal tread, rather than getting stuck on its sharp edge.
+    var forward := motion.normalized() * maxf(motion.length(), 0.18)
+    if body.test_move(raised, forward, null, STEP_MARGIN):
         return false
     var ahead := raised
-    ahead.origin += motion
+    ahead.origin += forward
     var landing := KinematicCollision3D.new()
     if not body.test_move(ahead, -Vector3.UP * (STEP_HEIGHT + 0.06), landing, STEP_MARGIN):
         return false
@@ -574,15 +577,15 @@ func _smoke() -> void:
     probe_collision.shape = probe_capsule
     probe_collision.position.y = 0.825
     probe.add_child(probe_collision)
-    probe.position = Vector3(0.28, 0.003, 0)
+    probe.position = Vector3(0.18, 0.003, 0)
     await get_tree().physics_frame
     await get_tree().physics_frame
-    if not try_step_up(probe, Vector3(0.30, 0, 0)) or probe.position.y < 0.15:
+    if not try_step_up(probe, Vector3(0.40, 0, 0)) or probe.position.y < 0.15:
         push_error("Stair step-up regression")
         get_tree().quit(1)
         return
-    probe.position = Vector3(-0.28, 0.003, 0)
-    if try_step_up(probe, Vector3(-0.30, 0, 0)):
+    probe.position = Vector3(-0.18, 0.003, 0)
+    if try_step_up(probe, Vector3(-0.40, 0, 0)):
         push_error("Step-up passed through a tall wall")
         get_tree().quit(1)
         return
