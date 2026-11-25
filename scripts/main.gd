@@ -4,6 +4,8 @@ const Saves = preload("res://scripts/save_store.gd")
 const FACILITY := "res://assets/facility.glb"
 const UNIT := "res://assets/unit.glb"
 const CHARACTER := "res://assets/player.glb"
+const AVATAR := "res://assets/shino.glb"
+const HumanoidRetarget = preload("res://scripts/humanoid_retarget.gd")
 const SPEED := 3.4
 const REACH := 2.0
 const STEP_HEIGHT := 0.32
@@ -24,6 +26,8 @@ var world: Node3D
 var player: CharacterBody3D
 var visual: Node3D
 var animator: AnimationPlayer
+var retargeter: RefCounted
+var avatar_ready := false
 var walk: StringName
 var idle: StringName
 var camera: Camera3D
@@ -117,7 +121,7 @@ func named_animation(ap: AnimationPlayer, needle: String) -> StringName:
 func start_game(data: Dictionary) -> void:
     if is_instance_valid(world):
         return
-    for path in [FACILITY, UNIT, CHARACTER]:
+    for path in [FACILITY, UNIT, CHARACTER, AVATAR]:
         if not (ResourceLoader.load(path) is PackedScene):
             OS.alert("Run python tools/fetch_assets.py and import the project first.", "Missing model assets")
             return
@@ -170,14 +174,25 @@ func start_game(data: Dictionary) -> void:
     collision.shape = capsule
     collision.position.y = 0.825
     player.add_child(collision)
-    visual = model(CHARACTER, player)
-    # Normalize the character's height without modifying its skin or rig.
-    var bounds := model_bounds(visual)
+    visual = Node3D.new()
+    visual.name = "CharacterVisual"
+    player.add_child(visual)
+    var donor := model(CHARACTER, visual)
+    var avatar := model(AVATAR, visual)
+    # The original VRM 0.x model faces -Z, while the game uses +Z forward.
+    avatar.rotation.y = PI
+    var bounds := model_bounds(avatar)
     if bounds.size.y > 0.01:
         var factor := 1.7 / bounds.size.y
-        visual.scale = Vector3.ONE * factor
-        visual.position.y = -bounds.position.y * factor
-    animator = animation_in(visual)
+        avatar.scale = Vector3.ONE * factor
+        avatar.position.y = -bounds.position.y * factor
+    retargeter = HumanoidRetarget.new()
+    avatar_ready = retargeter.setup(donor, avatar, visual)
+    donor.visible = not avatar_ready
+    avatar.visible = avatar_ready
+    if not avatar_ready:
+        push_error("Avatar retarget failed; showing the original character.")
+    animator = animation_in(donor)
     walk = named_animation(animator, "walking_a")
     if walk == &"":
         walk = named_animation(animator, "walk")
@@ -188,6 +203,10 @@ func start_game(data: Dictionary) -> void:
                 animator.get_animation(clip).loop_mode = Animation.LOOP_LINEAR
         if idle != &"":
             animator.play(idle)
+        animator.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
+        animator.advance(0.0)
+        if avatar_ready:
+            retargeter.apply_pose()
     var p: Array = state["position"]
     player.position = Vector3(float(p[0]), float(p[1]), float(p[2]))
     visual.rotation.y = float(state.get("rotation", 0.0))
@@ -453,6 +472,9 @@ func _physics_process(delta: float) -> void:
         var clip := walk if direction.length() > 0.05 else idle
         if clip != &"" and animator.current_animation != clip:
             animator.play(clip, 0.12)
+        animator.advance(delta)
+        if avatar_ready:
+            retargeter.apply_pose()
     update_camera(delta)
     update_nearby()
     if Input.is_action_just_pressed("use"):
@@ -537,10 +559,23 @@ func _smoke() -> void:
     var initial := Saves.new_slot()
     start_game(initial)
     await get_tree().process_frame
-    if not is_instance_valid(player) or animator == null or walk == &"" or idle == &"" or doors.size() != 4:
+    if not is_instance_valid(player) or animator == null or walk == &"" or idle == &"" or doors.size() != 4 or not avatar_ready:
         push_error("Player, animations, or units failed to initialize")
         get_tree().quit(1)
         return
+    var thigh: int = retargeter.target_keys["leftUpperLeg"]
+    animator.play(walk)
+    animator.advance(0.0)
+    retargeter.apply_pose()
+    var pose_before: Quaternion = retargeter.target.get_bone_pose_rotation(thigh)
+    animator.advance(0.23)
+    retargeter.apply_pose()
+    var pose_after: Quaternion = retargeter.target.get_bone_pose_rotation(thigh)
+    if pose_before.angle_to(pose_after) < 0.01:
+        push_error("Shino walking animation did not move the mapped thigh")
+        get_tree().quit(1)
+        return
+    animator.play(idle)
     for door in doors:
         if named_animation(door["player"], "open") == &"" or named_animation(door["player"], "close") == &"":
             push_error("Door clips missing")

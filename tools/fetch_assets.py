@@ -16,6 +16,7 @@ CACHE.mkdir(exist_ok=True)
 MODELS = {
     "facility.glb": ("https://cdn.3dassets.dev/assets/34733/v1/model.glb", 897836, None),
     "unit.glb": ("https://cdn.3dassets.dev/assets/34694/v1/model.glb", 26452, None),
+    "shino.glb": ("https://raw.githubusercontent.com/madjin/vrm-samples/e16eb187100149a315ad92c3c9968f1d5baa6c7d/vroid/beta/Sendagaya_Shino.vrm", 15074328, "91f7c9e9ec990efb9de305e4c1d0e32a46498830"),
     "player.glb": ("https://raw.githubusercontent.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0/672074b73ba276876a19e8816ecdc5241817ab47/addons/kaykit_character_pack_adventures/Characters/gltf/Rogue.glb", 3616284, "c8827661105eef7b2bfbef3bc676d41a47625733"),
 }
 for filename, (url, size, git_sha) in MODELS.items():
@@ -45,6 +46,40 @@ for filename, (url, size, git_sha) in MODELS.items():
     print(filename, len(data), "animations:", names)
 
     target = ASSETS / filename
+    if filename == "shino.glb":
+        # VRM 0.x is a GLB container. Preserve the skin, textures, morphs and
+        # fallback glTF materials; turn the explicit humanoid map into stable
+        # joint names for Godot. VRM-only spring bones/MToon are not required
+        # for this first locomotion test.
+        vrm = doc.get("extensions", {}).get("VRM", {})
+        human = vrm.get("humanoid", {}).get("humanBones", [])
+        if not human or not doc.get("skins"):
+            raise RuntimeError("Shino has no VRM humanoid rig")
+        for item in human:
+            doc["nodes"][item["node"]]["name"] = "VRM_" + item["bone"]
+        def remove_vrm(value):
+            if isinstance(value, dict):
+                if "extensions" in value:
+                    value["extensions"].pop("VRM", None)
+                    if not value["extensions"]:
+                        del value["extensions"]
+                for key in ("extensionsUsed", "extensionsRequired"):
+                    if key in value:
+                        value[key] = [v for v in value[key] if v != "VRM"]
+                for child in list(value.values()):
+                    remove_vrm(child)
+            elif isinstance(value, list):
+                for child in value:
+                    remove_vrm(child)
+        remove_vrm(doc)
+        payload = json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        payload += b" " * ((-len(payload)) % 4)
+        rest = data[20 + length:]
+        target.write_bytes(struct.pack("<4sIIII", b"glTF", 2, 20 + len(payload) + len(rest), len(payload), 0x4E4F534A) + payload + rest)
+        print("Shino humanoid bones:", [item["bone"] for item in human])
+        continue
+    if filename == "player.glb":
+        print("KayKit skin joint names:", [[doc["nodes"][i].get("name") for i in skin["joints"]] for skin in doc["skins"]])
     if "KHR_mesh_quantization" in doc.get("extensionsUsed", []) or "KHR_mesh_quantization" in doc.get("extensionsRequired", []):
         npx = shutil.which("npx.cmd" if __import__("os").name == "nt" else "npx")
         if not npx:
