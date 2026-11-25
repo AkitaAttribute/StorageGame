@@ -6,6 +6,18 @@ const UNIT := "res://assets/unit.glb"
 const CHARACTER := "res://assets/player.glb"
 const SPEED := 3.4
 const REACH := 2.0
+const STEP_HEIGHT := 0.32
+const STEP_MARGIN := 0.002
+const CAMERA_DISTANCE := 7.96
+const CAMERA_SENSITIVITY := 0.004
+var camera_yaw := 0.0
+var camera_pitch := 0.50
+var camera_target := Vector3.ZERO
+var camera_touch := -1
+var camera_mouse := false
+var camera_distance := CAMERA_DISTANCE
+var movement_joystick: Control
+var stepped_last_frame := false
 var state: Dictionary = {}
 var doors: Array[Dictionary] = []
 var world: Node3D
@@ -145,7 +157,11 @@ func start_game(data: Dictionary) -> void:
         make_unit("unit_%02d" % i, Vector3(-13.0, 0, -4.5 + i * 3.15))
     player = CharacterBody3D.new()
     player.name = "Player"
-    player.floor_snap_length = 0.24
+    player.floor_snap_length = STEP_HEIGHT + 0.04
+    player.floor_max_angle = deg_to_rad(50.0)
+    player.floor_constant_speed = true
+    player.floor_stop_on_slope = true
+    player.safe_margin = STEP_MARGIN
     world.add_child(player)
     var collision := CollisionShape3D.new()
     var capsule := CapsuleShape3D.new()
@@ -179,8 +195,10 @@ func start_game(data: Dictionary) -> void:
     camera.fov = 65
     world.add_child(camera)
     camera.current = true
-    camera.position = player.position + Vector3(0, 4.8, 7.0)
-    camera.look_at(player.position + Vector3.UP)
+    camera_yaw = float(state.get("camera_yaw", 0.0))
+    camera_pitch = clampf(float(state.get("camera_pitch", 0.50)), 0.15, 1.22)
+    camera_target = player.position + Vector3.UP
+    update_camera(0.0)
     create_hud()
     save_game()
 
@@ -299,6 +317,7 @@ func create_hud() -> void:
     joystick.add_theme_stylebox_override("normal_tip", tip_style)
     joystick.add_theme_stylebox_override("pressed_tip", tip_pressed)
     hud.add_child(joystick)
+    movement_joystick = joystick
     use_button = Button.new()
     use_button.text = "Use"
     use_button.set_anchors_preset(Control.PRESET_BOTTOM_RIGHT)
@@ -311,26 +330,113 @@ func create_hud() -> void:
     use_button.hide()
     hud.add_child(use_button)
 
+func orbit_camera(relative: Vector2) -> void:
+    camera_yaw = wrapf(camera_yaw - relative.x * CAMERA_SENSITIVITY, -PI, PI)
+    camera_pitch = clampf(camera_pitch + relative.y * CAMERA_SENSITIVITY, 0.15, 1.22)
+
 func _input(event: InputEvent) -> void:
     if not is_instance_valid(player):
         return
-    if event is InputEventScreenTouch and event.pressed and mobile and is_instance_valid(use_button) and use_button.visible:
-        if use_button.get_global_rect().has_point(event.position):
-            use_nearby()
+    if mobile:
+        if event is InputEventScreenTouch:
+            if not event.pressed:
+                if event.index == camera_touch:
+                    camera_touch = -1
+                return
+            if is_instance_valid(use_button) and use_button.visible and use_button.get_global_rect().has_point(event.position):
+                use_nearby()
+                get_viewport().set_input_as_handled()
+                return
+            if is_instance_valid(movement_joystick) and movement_joystick.get_global_rect().has_point(event.position):
+                return
+            if camera_touch == -1:
+                camera_touch = event.index
+                get_viewport().set_input_as_handled()
+        elif event is InputEventScreenDrag and event.index == camera_touch:
+            orbit_camera(event.relative)
             get_viewport().set_input_as_handled()
+        return
+    if event is InputEventMouseButton and (event.button_index == MOUSE_BUTTON_LEFT or event.button_index == MOUSE_BUTTON_RIGHT):
+        camera_mouse = event.pressed
+        get_viewport().set_input_as_handled()
+    elif event is InputEventMouseMotion and camera_mouse:
+        orbit_camera(event.relative)
+        get_viewport().set_input_as_handled()
+
+func update_camera(delta: float) -> void:
+    var target := player.position + Vector3.UP
+    if delta <= 0.0:
+        camera_target = target
+    else:
+        camera_target = camera_target.lerp(target, 1.0 - exp(-delta * 14.0))
+    var offset := Vector3(0.0, sin(camera_pitch), cos(camera_pitch)).rotated(Vector3.UP, camera_yaw)
+    var desired := camera_target + offset * CAMERA_DISTANCE
+    var query := PhysicsRayQueryParameters3D.create(camera_target, desired, player.collision_mask, [player.get_rid()])
+    var hit := player.get_world_3d().direct_space_state.intersect_ray(query)
+    var available := CAMERA_DISTANCE
+    if not hit.is_empty():
+        available = maxf(0.25, camera_target.distance_to(hit["position"]) - 0.18)
+    if available < camera_distance or delta <= 0.0:
+        camera_distance = available
+    else:
+        camera_distance = lerpf(camera_distance, available, 1.0 - exp(-delta * 8.0))
+    camera.position = camera_target + offset * camera_distance
+    camera.look_at(camera_target)
+
+# Step up only when grounded, blocked by an obstacle, and a capsule sweep
+# confirms clearance upward, forward, and a walkable landing below.
+# This does not disable collision or let the player pass through tall walls.
+func try_step_up(body: CharacterBody3D, motion: Vector3) -> bool:
+    if motion.length_squared() < 0.000001:
+        return false
+    var start := body.global_transform
+    var obstacle := KinematicCollision3D.new()
+    if not body.test_move(start, motion, obstacle, STEP_MARGIN):
+        return false
+    if obstacle.get_normal().dot(Vector3.UP) >= cos(body.floor_max_angle):
+        return false
+    var rise := Vector3.UP * STEP_HEIGHT
+    if body.test_move(start, rise, null, STEP_MARGIN):
+        return false
+    var raised := start
+    raised.origin += rise
+    if body.test_move(raised, motion, null, STEP_MARGIN):
+        return false
+    var ahead := raised
+    ahead.origin += motion
+    var landing := KinematicCollision3D.new()
+    if not body.test_move(ahead, -Vector3.UP * (STEP_HEIGHT + 0.06), landing, STEP_MARGIN):
+        return false
+    if landing.get_normal().dot(Vector3.UP) < cos(body.floor_max_angle):
+        return false
+    var destination := ahead.origin + landing.get_travel()
+    var height := destination.y - start.origin.y
+    if height <= 0.005 or height > STEP_HEIGHT + STEP_MARGIN:
+        return false
+    body.global_position = destination
+    return true
 
 func _physics_process(delta: float) -> void:
     if not is_instance_valid(player):
         return
     var input := Input.get_vector("move_left", "move_right", "move_up", "move_down")
-    var direction := Vector3(input.x, 0, input.y)
+    var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw)
+    var grounded := player.is_on_floor() or stepped_last_frame
     player.velocity.x = direction.x * SPEED
     player.velocity.z = direction.z * SPEED
-    if not player.is_on_floor():
+    if not grounded:
         player.velocity.y -= 18.0 * delta
     else:
         player.velocity.y = -0.1
+    var stepped := grounded and try_step_up(player, direction * SPEED * delta)
+    if stepped:
+        player.velocity.x = 0.0
+        player.velocity.z = 0.0
+        player.velocity.y = -0.1
     player.move_and_slide()
+    if grounded and not player.is_on_floor() and player.velocity.y <= 0.0:
+        player.apply_floor_snap()
+    stepped_last_frame = stepped
     player.position.x = clampf(player.position.x, -29, 29)
     player.position.z = clampf(player.position.z, -29, 29)
     if player.position.y < -5:
@@ -341,8 +447,7 @@ func _physics_process(delta: float) -> void:
         var clip := walk if direction.length() > 0.05 else idle
         if clip != &"" and animator.current_animation != clip:
             animator.play(clip, 0.12)
-    camera.position = camera.position.lerp(player.position + Vector3(0, 4.8, 7), minf(1, delta * 9))
-    camera.look_at(player.position + Vector3.UP)
+    update_camera(delta)
     update_nearby()
     if Input.is_action_just_pressed("use"):
         use_nearby()
@@ -404,10 +509,15 @@ func save_game() -> void:
     var p := player.position
     state["position"] = [p.x, p.y, p.z]
     state["rotation"] = visual.rotation.y
+    state["camera_yaw"] = camera_yaw
+    state["camera_pitch"] = camera_pitch
     if not Saves.write_slot(state):
         push_warning("Unable to write save slot.")
 
 func _notification(what: int) -> void:
+    if what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_APPLICATION_PAUSED:
+        camera_touch = -1
+        camera_mouse = false
     if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_APPLICATION_PAUSED or what == NOTIFICATION_APPLICATION_FOCUS_OUT:
         save_game()
     if what == NOTIFICATION_WM_GO_BACK_REQUEST and is_instance_valid(player):
@@ -445,6 +555,47 @@ func _smoke() -> void:
         elapsed += get_process_delta_time()
     if not doors[0]["open"] or not Saves.read_slot(str(initial["id"])).get("doors", {}).get("unit_00", false):
         push_error("Door interaction or persistence failed")
+        get_tree().quit(1)
+        return
+    # Independent collision fixture above the facility: one ordinary stair
+    # riser and one full wall. Exercise the same sweep used during gameplay.
+    var fixture := Node3D.new()
+    world.add_child(fixture)
+    fixture.position = Vector3(0, 20, 0)
+    wall(fixture, Vector3(0, -0.1, 0), Vector3(10, 0.2, 10))
+    wall(fixture, Vector3(0.8, 0.10, 0), Vector3(0.6, 0.2, 2))
+    wall(fixture, Vector3(-0.8, 0.75, 0), Vector3(0.6, 1.5, 2))
+    var probe := CharacterBody3D.new()
+    fixture.add_child(probe)
+    var probe_collision := CollisionShape3D.new()
+    var probe_capsule := CapsuleShape3D.new()
+    probe_capsule.radius = 0.27
+    probe_capsule.height = 1.65
+    probe_collision.shape = probe_capsule
+    probe_collision.position.y = 0.825
+    probe.add_child(probe_collision)
+    probe.position = Vector3(0.28, 0.003, 0)
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    if not try_step_up(probe, Vector3(0.30, 0, 0)) or probe.position.y < 0.15:
+        push_error("Stair step-up regression")
+        get_tree().quit(1)
+        return
+    probe.position = Vector3(-0.28, 0.003, 0)
+    if try_step_up(probe, Vector3(-0.30, 0, 0)):
+        push_error("Step-up passed through a tall wall")
+        get_tree().quit(1)
+        return
+    fixture.queue_free()
+    var original_yaw := camera_yaw
+    orbit_camera(Vector2(100, 50))
+    if is_equal_approx(original_yaw, camera_yaw):
+        push_error("Camera orbit regression")
+        get_tree().quit(1)
+        return
+    save_game()
+    if not is_equal_approx(float(Saves.read_slot(str(initial["id"])).get("camera_yaw", 99.0)), camera_yaw):
+        push_error("Camera orientation persistence regression")
         get_tree().quit(1)
         return
     print("STORAGE_SMOKE_PASS")
