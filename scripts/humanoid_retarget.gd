@@ -15,9 +15,9 @@ var rest_foot_height := 0.0
 const CORE := ["hips", "spine", "head", "leftUpperArm", "rightUpperArm", "leftLowerArm", "rightLowerArm", "leftHand", "rightHand", "leftUpperLeg", "rightUpperLeg", "leftLowerLeg", "rightLowerLeg", "leftFoot", "rightFoot"]
 const BODY := {
     "hips": ["hips", "hip", "pelvis"],
-    "spine": ["spine", "spine01", "spine1", "lowerback"],
-    "chest": ["chest", "spine02", "spine2", "upperbody", "upperback"],
-    "upperChest": ["upperchest", "spine03", "spine3"],
+    "spine": ["spine001", "spine", "spine01", "spine1", "lowerback"],
+    "chest": ["spine002", "chest", "spine02", "spine2", "upperbody", "upperback"],
+    "upperChest": ["spine003", "upperchest", "spine03", "spine3"],
     "neck": ["neck", "neck01", "neck1"],
     "head": ["head"],
 }
