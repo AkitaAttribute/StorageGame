@@ -731,6 +731,16 @@ func _smoke() -> void:
         push_error("Roll-up door close regression")
         get_tree().quit(1)
         return
+    # Roof is the only shell piece reaching the exterior top plane.
+    var roof_mesh := rollup_unit.get_node("Roof") as MeshInstance3D
+    var roof_bottom := roof_mesh.position.y - (roof_mesh.mesh as BoxMesh).size.y * 0.5
+    for piece_name in ["LeftWall", "RightWall", "BackWall", "FrontFascia"]:
+        var piece := rollup_unit.get_node(piece_name) as MeshInstance3D
+        var piece_top := piece.position.y + (piece.mesh as BoxMesh).size.y * 0.5
+        if not is_equal_approx(piece_top, roof_bottom):
+            push_error("Roll-up shell meets roof incorrectly: " + piece_name)
+            get_tree().quit(1)
+            return
     # Closed slats must overlap instead of leaving see-through seams.
     for i in range(rollup_unit.slats.size() - 1):
         var lower := rollup_unit.slats[i] as Node3D

@@ -7,6 +7,8 @@ const DEPTH := 3.0
 const SLAT_COUNT := 24
 const FRONT := 1.42
 const FLOOR := 0.025
+const ROOF_THICKNESS := 0.08
+const WALL_THICKNESS := 0.08
 var unit_height := 2.4
 var clear_height := 1.9
 var radius := 0.19
@@ -68,20 +70,29 @@ func build(height: float, initially_open: bool) -> void:
     var panel := metal(Color(0.18, 0.37, 0.58), 0.48, 0.38)
     var ribs := metal(Color(0.22, 0.43, 0.64), 0.48, 0.38)
     var concrete := metal(Color(0.48, 0.49, 0.49), 0.0, 0.9)
+    # Butt-jointed shell: the wall tops terminate at the roof underside.
+    # No siding or fascia face occupies the same plane as the roof top.
+    var wall_height := unit_height - ROOF_THICKNESS
+    var inside_width := WIDTH - WALL_THICKNESS * 2.0
+    var fascia_height := wall_height - clear_height
     # Walkable floor and a single sealed roof. The winding barrel remains exposed inside.
     box(self, Vector3(0, 0.0, 0), Vector3(WIDTH, 0.05, DEPTH), concrete, true)
     for side in [-1.0, 1.0]:
-        box(self, Vector3(side * 1.46, unit_height * 0.5, 0), Vector3(0.08, unit_height, DEPTH), siding, true)
+        var side_wall := box(self, Vector3(side * (WIDTH - WALL_THICKNESS) * 0.5, wall_height * 0.5, 0), Vector3(WALL_THICKNESS, wall_height, DEPTH), siding, true)
+        side_wall.name = "LeftWall" if side < 0.0 else "RightWall"
         # Raised sheet-metal seams on the side walls.
         for j in range(15):
-            box(self, Vector3(side * 1.503, unit_height * 0.5, -1.4 + j * 0.20), Vector3(0.012, unit_height - 0.08, 0.025), rail)
+            box(self, Vector3(side * 1.503, wall_height * 0.5, -1.4 + j * 0.20), Vector3(0.012, wall_height - 0.08, 0.025), rail)
         box(self, Vector3(side * 1.40, clear_height * 0.5, FRONT), Vector3(0.10, clear_height, 0.12), trim, true)
         box(self, Vector3(side * 1.345, clear_height * 0.5, FRONT + 0.035), Vector3(0.045, clear_height, 0.045), rail)
         box(self, Vector3(side * 1.38, clear_height + radius * 0.48, FRONT - radius), Vector3(0.055, cavity * 0.78, radius * 2.2), trim)
-    box(self, Vector3(0, unit_height * 0.5, -1.46), Vector3(WIDTH, unit_height, 0.08), siding, true)
-    box(self, Vector3(0, unit_height - 0.04, 0), Vector3(WIDTH, 0.08, DEPTH), trim, true)
-    box(self, Vector3(0, clear_height + cavity * 0.5, 1.49), Vector3(WIDTH, cavity, 0.025), siding, true)
-    box(self, Vector3(0, clear_height + 0.025, 1.49), Vector3(WIDTH, 0.05, 0.04), trim)
+    var back_wall := box(self, Vector3(0, wall_height * 0.5, -(DEPTH - WALL_THICKNESS) * 0.5), Vector3(inside_width, wall_height, WALL_THICKNESS), siding, true)
+    back_wall.name = "BackWall"
+    var roof := box(self, Vector3(0, unit_height - ROOF_THICKNESS * 0.5, 0), Vector3(WIDTH, ROOF_THICKNESS, DEPTH), trim, true)
+    roof.name = "Roof"
+    var fascia := box(self, Vector3(0, clear_height + fascia_height * 0.5, DEPTH * 0.5 - 0.0125), Vector3(inside_width, fascia_height, 0.025), siding, true)
+    fascia.name = "FrontFascia"
+    box(self, Vector3(0, clear_height + 0.025, 1.49), Vector3(inside_width, 0.05, 0.04), trim)
     var drum := CylinderMesh.new()
     drum.top_radius = radius * 0.56
     drum.bottom_radius = drum.top_radius
