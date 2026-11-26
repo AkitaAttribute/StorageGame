@@ -1,6 +1,6 @@
 extends SceneTree
 
-const Updater = preload("res://scripts/update_manager.gd")
+const Updater = preload("res://scripts/update_runtime.gd")
 
 func _initialize() -> void:
     call_deferred("run_test")

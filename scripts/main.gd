@@ -50,6 +50,8 @@ var save_clock := 0.0
 var mobile := OS.get_name() == "Android"
 
 func _ready() -> void:
+    # The mounted patch, not the original APK's updater, owns update dialogs.
+    preload("res://scripts/update_bridge.gd").attach(self)
     for pair in [["move_up", KEY_W], ["move_down", KEY_S], ["move_left", KEY_A], ["move_right", KEY_D], ["use", KEY_E]]:
         var action := StringName(pair[0])
         if not InputMap.has_action(action):
@@ -657,6 +659,12 @@ func _notification(what: int) -> void:
         get_tree().quit()
 
 func _smoke() -> void:
+    var updater := get_node_or_null("PatchableUpdater")
+    var bootstrap := get_tree().root.get_node_or_null("UpdateManager")
+    if updater == null or bootstrap == null or int(updater.get("_current_build")) < int(bootstrap.get("_current_build")):
+        push_error("Patchable updater bridge did not preserve active build")
+        get_tree().quit(1)
+        return
     var initial := Saves.new_slot()
     start_game(initial)
     await get_tree().process_frame
