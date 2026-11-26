@@ -7,6 +7,7 @@ const CHARACTER := "res://assets/locomotion.glb"
 const AVATAR := "res://assets/shino.glb"
 const HumanoidRetarget = preload("res://scripts/humanoid_retarget.gd")
 const HouseholdProps = preload("res://scripts/household_props.gd")
+const NaturalGait = preload("res://scripts/natural_gait.gd")
 const SPEED := 3.4
 const ROLLUP_SCENE = preload("res://scenes/rollup_unit.tscn")
 const CHARACTER_HEIGHT := 1.7
@@ -34,6 +35,7 @@ var stepped_last_frame := false
 var reference_unit_height := 2.4
 var rollup_unit: Node3D
 var household: HouseholdProps
+var natural_gait: NaturalGait
 var force_pose_weight := 0.0
 var force_target := Vector3.ZERO
 var state: Dictionary = {}
@@ -245,6 +247,9 @@ func start_game(data: Dictionary) -> void:
     var p: Array = state["position"]
     player.position = Vector3(float(p[0]), float(p[1]), float(p[2]))
     visual.rotation.y = float(state.get("rotation", 0.0))
+    if avatar_ready:
+        natural_gait = NaturalGait.new()
+        natural_gait.setup(retargeter, player, visual, avatar_model, avatar_base_y)
     camera = Camera3D.new()
     camera.fov = 65
     world.add_child(camera)
@@ -613,8 +618,12 @@ func _physics_process(delta: float) -> void:
         animator.advance(delta * playback)
         if avatar_ready:
             retargeter.apply_pose()
-            foot_offset = lerpf(foot_offset, retargeter.foot_ground_correction(), 1.0 - exp(-delta * 24.0))
-            avatar_model.position.y = avatar_base_y + foot_offset
+            if natural_gait != null and natural_gait.ready:
+                var holding_prop := is_instance_valid(household) and is_instance_valid(household.held)
+                natural_gait.tick(delta, displacement / maxf(delta, 0.001), player.is_on_floor() or stepped_last_frame, holding_prop)
+            else:
+                foot_offset = lerpf(foot_offset, retargeter.foot_ground_correction(), 1.0 - exp(-delta * 24.0))
+                avatar_model.position.y = avatar_base_y + foot_offset
     update_camera(delta)
     if is_instance_valid(household):
         household.tick(delta)
@@ -742,6 +751,10 @@ func _smoke() -> void:
         push_error("Player, animations, or units failed to initialize")
         get_tree().quit(1)
         return
+    if natural_gait == null or not natural_gait.ready:
+        push_error("Footstep-driven gait did not initialize")
+        get_tree().quit(1)
+        return
     var prop_wait := 0
     while not household.placement_complete and prop_wait < 120:
         await get_tree().physics_frame
@@ -752,6 +765,10 @@ func _smoke() -> void:
         return
     # Untouched items must actually remain at the placed floor locations,
     # not merely exist at the instant the initialization test runs.
+    if natural_gait.feet.size() != 2:
+        push_error("Gait foot contacts missing")
+        get_tree().quit(1)
+        return
     var initial_prop_positions: Array[Vector3] = []
     for item in household.items:
         initial_prop_positions.append(item.global_position)

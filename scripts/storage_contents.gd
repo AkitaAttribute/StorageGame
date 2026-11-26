@@ -64,7 +64,7 @@ func lock_item(item: RigidBody3D, id: String, local_pose: Transform3D) -> bool:
         var other_pose: Transform3D = locked[other]["local"]
         var other_dimensions: Vector3 = other.get_meta("dimensions")
         var other_bounds := other_pose * AABB(-other_dimensions * 0.5, other_dimensions)
-        if bounds.intersects(other_bounds):
+        if bounds.grow(-0.004).intersects(other_bounds.grow(-0.004)):
             return false
     locked[item] = {"slot": id, "local": local_pose}
     item.set_meta("storage_owner", self)
