@@ -19,11 +19,18 @@ const STEP_PRESENTATION_RATE := 1.8
 const STEP_EDGE_REACH := 0.27
 const STEP_MARGIN := 0.002
 const CAMERA_DISTANCE := 3.0
+const CAMERA_PITCH_LIMIT := deg_to_rad(89.5)
+const CAMERA_COLLISION_RADIUS := 0.16
+const CAMERA_COLLISION_MARGIN := 0.035
+const CAMERA_MIN_DISTANCE := 0.06
+const CAMERA_RETURN_RATE := 10.0
 const CAMERA_TARGET_HEIGHT := 1.1
 const CAMERA_SENSITIVITY := 0.004
 var camera_yaw := 0.0
 var camera_pitch := 0.50
 var camera_target := Vector3.ZERO
+var camera_distance := CAMERA_DISTANCE
+var camera_probe := SphereShape3D.new()
 var camera_touch := -1
 var camera_mouse_paused := false
 var visual_step_offset := 0.0
@@ -252,10 +259,12 @@ func start_game(data: Dictionary) -> void:
         natural_gait.setup(retargeter, player, visual, avatar_model, avatar_base_y)
     camera = Camera3D.new()
     camera.fov = 65
+    camera.near = 0.035
+    camera_probe.radius = CAMERA_COLLISION_RADIUS
     world.add_child(camera)
     camera.current = true
     camera_yaw = float(state.get("camera_yaw", 0.0))
-    camera_pitch = clampf(float(state.get("camera_pitch", 0.50)), -0.18, 1.22)
+    camera_pitch = clampf(float(state.get("camera_pitch", 0.50)), -CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT)
     camera_target = player.position + Vector3.UP * CAMERA_TARGET_HEIGHT
     update_camera(0.0)
     create_hud()
@@ -459,7 +468,7 @@ func create_hud() -> void:
 
 func orbit_camera(relative: Vector2) -> void:
     camera_yaw = wrapf(camera_yaw - relative.x * CAMERA_SENSITIVITY, -PI, PI)
-    camera_pitch = clampf(camera_pitch + relative.y * CAMERA_SENSITIVITY, -0.18, 1.22)
+    camera_pitch = clampf(camera_pitch + relative.y * CAMERA_SENSITIVITY, -CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT)
 
 func _input(event: InputEvent) -> void:
     if not is_instance_valid(player):
@@ -502,9 +511,42 @@ func update_camera(delta: float) -> void:
     else:
         camera_target = camera_target.lerp(target, 1.0 - exp(-delta * 14.0))
     var offset := Vector3(0.0, sin(camera_pitch), cos(camera_pitch)).rotated(Vector3.UP, camera_yaw)
-    # Keep a fixed orbit radius even when a wall is between camera and player.
-    camera.position = camera_target + offset * CAMERA_DISTANCE
+    # Never interpolate through an obstruction. Contract immediately and
+    # ease outward only while the entire requested path remains clear.
+    var allowed := camera_clear_distance(camera_target, offset)
+    if delta <= 0.0 or allowed < camera_distance:
+        camera_distance = allowed
+    else:
+        camera_distance = minf(allowed, lerpf(camera_distance, allowed, 1.0 - exp(-delta * CAMERA_RETURN_RATE)))
+    camera.position = camera_target + offset * camera_distance
     camera.look_at(camera_target)
+
+func camera_clear_distance(origin: Vector3, direction: Vector3) -> float:
+    var space := player.get_world_3d().direct_space_state
+    var motion := direction.normalized() * CAMERA_DISTANCE
+    # A volume sweep accounts for near-plane clearance at wall edges,
+    # unlike a ray alone. Ignore the player's own capsule and prop-only
+    # perimeter boundaries, but include actual household props and walls.
+    var query := PhysicsShapeQueryParameters3D.new()
+    query.shape = camera_probe
+    query.transform = Transform3D(Basis.IDENTITY, origin)
+    query.motion = motion
+    query.collision_mask = 3
+    query.exclude = [player.get_rid()]
+    query.margin = CAMERA_COLLISION_MARGIN
+    var fractions := space.cast_motion(query)
+    var allowed := CAMERA_DISTANCE
+    if fractions.size() >= 2:
+        allowed = CAMERA_DISTANCE * fractions[0]
+    # cast_motion can ignore shapes that overlap the starting sphere.
+    # A center ray also prevents passing through a solid in that case.
+    var ray := PhysicsRayQueryParameters3D.create(origin, origin + motion, 3, [player.get_rid()])
+    ray.hit_from_inside = true
+    var hit := space.intersect_ray(ray)
+    if not hit.is_empty():
+        var hit_distance := origin.distance_to(Vector3(hit["position"]))
+        allowed = minf(allowed, hit_distance - CAMERA_COLLISION_RADIUS - CAMERA_COLLISION_MARGIN)
+    return clampf(allowed, CAMERA_MIN_DISTANCE, CAMERA_DISTANCE)
 
 # Step up only when grounded, blocked by an obstacle, and a capsule sweep
 # confirms clearance upward, forward, and a walkable landing below.
@@ -1136,6 +1178,43 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     fixture.queue_free()
+    # Isolated camera collision fixture: a floor and an obstruction behind
+    # the target. This also tests the full unobstructed distance above it.
+    var camera_fixture := Node3D.new()
+    world.add_child(camera_fixture)
+    camera_fixture.position = Vector3(0, 27, 0)
+    wall(camera_fixture, Vector3(0, -0.1, 0), Vector3(8, 0.2, 8))
+    var camera_wall := wall(camera_fixture, Vector3(0, 1.1, 1.4), Vector3(4, 3, 0.2))
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    var pivot := camera_fixture.global_position + Vector3.UP * 1.1
+    var down_distance := camera_clear_distance(pivot, Vector3.DOWN)
+    var wall_distance := camera_clear_distance(pivot, Vector3.BACK)
+    var up_distance := camera_clear_distance(pivot, Vector3.UP)
+    if down_distance < 0.65 or down_distance > 1.0 or wall_distance < 0.85 or wall_distance > 1.2 or not is_equal_approx(up_distance, CAMERA_DISTANCE):
+        push_error("Camera sweep failed floor/wall/open-space clearance")
+        get_tree().quit(1)
+        return
+    camera_wall.queue_free()
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    if not is_equal_approx(camera_clear_distance(pivot, Vector3.BACK), CAMERA_DISTANCE):
+        push_error("Camera did not recover unobstructed radius")
+        get_tree().quit(1)
+        return
+    camera_fixture.queue_free()
+    var original_pitch := camera_pitch
+    orbit_camera(Vector2(0, -10000))
+    if not is_equal_approx(camera_pitch, -CAMERA_PITCH_LIMIT):
+        push_error("Downward camera orbit range regression")
+        get_tree().quit(1)
+        return
+    orbit_camera(Vector2(0, 20000))
+    if not is_equal_approx(camera_pitch, CAMERA_PITCH_LIMIT):
+        push_error("Upward camera orbit range regression")
+        get_tree().quit(1)
+        return
+    camera_pitch = original_pitch
     var original_yaw := camera_yaw
     orbit_camera(Vector2(100, 50))
     if is_equal_approx(original_yaw, camera_yaw):
@@ -1143,8 +1222,9 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     update_camera(0.0)
-    if not is_equal_approx(camera.position.distance_to(camera_target), CAMERA_DISTANCE):
-        push_error("Camera orbit radius regression")
+    var orbit_direction := (camera.position - camera_target).normalized()
+    if not is_equal_approx(camera.position.distance_to(camera_target), camera_clear_distance(camera_target, orbit_direction)):
+        push_error("Camera collision-adjusted orbit radius regression")
         get_tree().quit(1)
         return
     save_game()
