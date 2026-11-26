@@ -103,12 +103,15 @@ func build(owner_body: RigidBody3D, size: Vector3) -> void:
     part(self, "Top", Vector3(0, top - t * 0.5, cz), Vector3(w - 2.0 * t, t, cabinet_depth), steel, true)
     part(self, "Base", Vector3(0, bottom + t * 0.5, cz), Vector3(w - 2.0 * t, t, cabinet_depth), steel, true)
     part(self, "Divider", Vector3(0, split, cz), Vector3(w - 2.0 * t, t, cabinet_depth), liner, true)
+    # Opaque cabinet-mounted mullion behind the narrow door seam. It
+    # spans the full gap, while each door can still rotate independently.
+    part(self, "CenterSeamSeal", Vector3(0, split, front + 0.002), Vector3(w - 0.008, 0.052, 0.016), dark)
     for fraction in [0.24, 0.49]:
         part(self, "Shelf", Vector3(0, bottom + h * fraction, cz - 0.015), Vector3(w - 2.0 * t - 0.008, 0.018, cabinet_depth - 0.075), shelf, true)
     part(self, "FreezerShelf", Vector3(0, split + (top - split) * 0.48, cz - 0.015), Vector3(w - 2.0 * t - 0.008, 0.018, cabinet_depth - 0.075), shelf, true)
     part(self, "LowerTrim", Vector3(0, bottom + 0.025, front - 0.004), Vector3(w - 0.02, 0.035, 0.012), dark)
-    make_door("fridge", "fridge", bottom + 0.050, split - 0.012, w, d, door_depth, steel, liner, dark, handle)
-    make_door("freezer", "freezer", split + 0.012, top - 0.008, w, d, door_depth, steel, liner, dark, handle)
+    make_door("fridge", "fridge", bottom + 0.050, split - 0.003, w, d, door_depth, steel, liner, dark, handle)
+    make_door("freezer", "freezer", split + 0.003, top - 0.008, w, d, door_depth, steel, liner, dark, handle)
     storage = StorageContents.new()
     storage.name = "StorageContents"
     body.add_child(storage)

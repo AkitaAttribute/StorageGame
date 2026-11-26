@@ -11,7 +11,7 @@ var compartments: Dictionary = {}
 var locked: Dictionary = {}
 signal contents_changed
 var inventory: Node
-const CONTACT_TOLERANCE := 0.015
+const CONTACT_TOLERANCE := 0.025
 
 func configure(owner_body: RigidBody3D) -> void:
     body = owner_body
@@ -46,28 +46,56 @@ func fits(id: String, local_pose: Transform3D, dimensions: Vector3) -> bool:
     if not compartments.has(id):
         return false
     # Entire item, not just its origin, must fit inside the cabinet.
+    return fits_bounds(id, local_pose * AABB(-dimensions * 0.5, dimensions))
+
+func fits_bounds(id: String, extents: AABB) -> bool:
+    if not compartments.has(id):
+        return false
     var volume: AABB = compartments[id]["volume"]
-    var extents := local_pose * AABB(-dimensions * 0.5, dimensions)
     # Contact offsets can leave a resting rigid body a few millimeters
     # inside the floor or side wall. Accept that contact, not an object
     # protruding through the doorway. The front face is +Z.
     var minimum := volume.position - Vector3.ONE * CONTACT_TOLERANCE
-    var maximum := volume.end + Vector3(CONTACT_TOLERANCE, CONTACT_TOLERANCE, 0.006)
+    var maximum := volume.end + Vector3(CONTACT_TOLERANCE, CONTACT_TOLERANCE, 0.018)
     return extents.position.x >= minimum.x and extents.position.y >= minimum.y and extents.position.z >= minimum.z and extents.end.x <= maximum.x and extents.end.y <= maximum.y and extents.end.z <= maximum.z
 
+# Exact model envelope in cabinet-local coordinates. A rotated padded
+# collision box is often wider than a screwdriver's real geometry.
+# Cache mesh-space vertices once per item; only transform them on closure,
+# save restoration or a specific containment query, never every frame.
+func fits_item(id: String, item: RigidBody3D, local_pose: Transform3D) -> bool:
+    var points: PackedVector3Array
+    if item.has_meta("storage_vertices"):
+        points = item.get_meta("storage_vertices")
+    else:
+        points = PackedVector3Array()
+        var inverse := item.global_transform.affine_inverse()
+        for node in item.find_children("*", "MeshInstance3D", true, false):
+            var mesh_node := node as MeshInstance3D
+            if mesh_node.mesh == null or not mesh_node.visible or mesh_node.has_meta("stored_mask"):
+                continue
+            var to_item := inverse * mesh_node.global_transform
+            for vertex in mesh_node.mesh.get_faces():
+                points.append(to_item * vertex)
+        item.set_meta("storage_vertices", points)
+    if points.is_empty():
+        return fits(id, local_pose, item.get_meta("dimensions", Vector3.ZERO))
+    var extents := AABB(local_pose * points[0], Vector3.ZERO)
+    for vertex in points:
+        extents = extents.expand(local_pose * vertex)
+    return fits_bounds(id, extents)
+
 func slot_for(item: RigidBody3D) -> String:
-    var dimensions: Vector3 = item.get_meta("dimensions", Vector3.ZERO)
     var local_pose := body.global_transform.affine_inverse() * item.global_transform
     for id in compartments:
-        if fits(str(id), local_pose, dimensions):
+        if fits_item(str(id), item, local_pose):
             return str(id)
     return ""
 
 func lock_item(item: RigidBody3D, id: String, local_pose: Transform3D, restoring: bool = false) -> bool:
     if item == body or item.has_meta("storage_owner") or item.get_meta("object_type", "") == "container":
         return false
-    var dimensions: Vector3 = item.get_meta("dimensions", Vector3.ZERO)
-    if (not is_closed(id) and (not restoring or is_open(id))) or not fits(id, local_pose, dimensions):
+    if (not is_closed(id) and (not restoring or is_open(id))) or not fits_item(id, item, local_pose):
         return false
     # Live contents have already been separated by the physics solver.
     # Overlapping axis-aligned bounds are not evidence of mesh intersection
@@ -123,10 +151,14 @@ func _capture(id: String) -> void:
     if not is_instance_valid(inventory) or not inventory.placement_complete or bool(body.get_meta("recovering", false)):
         return
     for item in inventory.items:
-        if not is_instance_valid(item) or item == body or item == inventory.held or item.has_meta("storage_owner") or bool(item.get_meta("recovering", false)):
+        if not is_instance_valid(item) or item == body or item.get_meta("object_type", "") == "container" or item.has_meta("storage_owner") or bool(item.get_meta("recovering", false)):
             continue
         var relative: Transform3D = body.global_transform.affine_inverse() * item.global_transform
-        if fits(id, relative, item.get_meta("dimensions", Vector3.ZERO)):
+        # No sleeping, velocity or floor-contact condition. Capture even a
+        # flying/held object if its actual geometry is inside at closure.
+        if fits_item(id, item, relative):
+            if item == inventory.held:
+                inventory.drop()
             lock_item(item, id, relative)
 
 func _release_slot(id: String) -> void:

@@ -312,7 +312,7 @@ func inside_open_container(body: RigidBody3D, pose: Transform3D) -> bool:
         var relative := item.global_transform.affine_inverse() * pose
         for id in storage.compartments:
             var closure: HingedPanel = storage.compartments[id]["closure"]
-            if closure.goal >= StorageContents.OPEN_CLEARANCE and storage.fits(str(id), relative, body.get_meta("dimensions")):
+            if closure.goal >= StorageContents.OPEN_CLEARANCE and storage.fits_item(str(id), body, relative):
                 return true
     return false
 
@@ -413,18 +413,23 @@ func set_highlight(body: RigidBody3D, enabled: bool) -> void:
 func select_at_crosshair() -> void:
     var next: RigidBody3D = null
     var next_panel: HingedPanel = null
-    if not is_instance_valid(held):
-        var origin := ray_origin()
-        var query := PhysicsRayQueryParameters3D.create(origin, origin + ray_direction() * 9.0, WORLD_MASK, [player.get_rid()])
-        var hit := get_world_3d().direct_space_state.intersect_ray(query)
-        if not hit.is_empty():
-            var candidate := hit.get("collider") as RigidBody3D
-            var shoulder := player.global_position + Vector3.UP * 1.2
-            if is_instance_valid(candidate) and items.has(candidate) and shoulder.distance_to(Vector3(hit["position"])) <= REACH:
-                next = candidate
-                next_panel = panel_from_hit(candidate, hit)
+    # The door remains usable while carrying another item. Exclude the
+    # held object's own collider so it does not obscure the crosshair.
+    var origin := ray_origin()
+    var excluded: Array[RID] = [player.get_rid()]
+    if is_instance_valid(held):
+        excluded.append(held.get_rid())
+    var query := PhysicsRayQueryParameters3D.create(origin, origin + ray_direction() * 9.0, WORLD_MASK, excluded)
+    var hit := get_world_3d().direct_space_state.intersect_ray(query)
+    if not hit.is_empty():
+        var candidate := hit.get("collider") as RigidBody3D
+        var shoulder := player.global_position + Vector3.UP * 1.2
+        if is_instance_valid(candidate) and items.has(candidate) and shoulder.distance_to(Vector3(hit["position"])) <= REACH:
+            next = candidate
+            next_panel = panel_from_hit(candidate, hit)
     if selected != next or selected_panel != next_panel:
-        set_highlight(selected, false)
+        if selected != held:
+            set_highlight(selected, false)
         selected = next
         selected_panel = next_panel
         if is_instance_valid(selected_panel):
@@ -443,7 +448,7 @@ func panel_from_hit(candidate: RigidBody3D, hit: Dictionary) -> HingedPanel:
     return null
 
 func has_panel_action() -> bool:
-    return is_instance_valid(selected_panel) and not is_instance_valid(held)
+    return is_instance_valid(selected_panel)
 
 func panel_action_text() -> String:
     return selected_panel.action_text() if has_panel_action() else ""

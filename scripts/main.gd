@@ -891,6 +891,13 @@ func _smoke() -> void:
                 push_error("Refrigerator hinge hardware detached")
                 get_tree().quit(1)
                 return
+    # Verify the opaque fixed seam spans both door edges.
+    var seam := fridge.get_node("CenterSeamSeal") as MeshInstance3D
+    var seam_height := (seam.mesh as BoxMesh).size.y
+    if seam_height < 0.02:
+        push_error("Refrigerator door seam is not sealed")
+        get_tree().quit(1)
+        return
     var hinge_state: Dictionary = fridge.snapshot()
     if float(hinge_state.get("freezer", 0.0)) < 1.6:
         push_error("Refrigerator hinge state not captured")
@@ -912,6 +919,10 @@ func _smoke() -> void:
         push_error("Open compartment secured cargo prematurely")
         get_tree().quit(1)
         return
+    # A moving, held item must also be captured if enclosed at closure.
+    household.grab(cargo)
+    cargo.freeze = true
+    cargo.linear_velocity = Vector3(0.25, 0.0, 0.0)
     var stationary_pose := test_prop.global_transform
     fridge.panels[0].toggle()
     for i in range(65):
@@ -921,8 +932,8 @@ func _smoke() -> void:
             get_tree().quit(1)
             return
         await get_tree().physics_frame
-    if not test_prop.global_transform.is_equal_approx(stationary_pose) or not cargo.has_meta("storage_owner") or cargo.collision_layer != 0 or not cargo.freeze or not is_zero_approx(cargo.gravity_scale):
-        push_error("Stationary container did not secure cargo on closure")
+    if not test_prop.global_transform.is_equal_approx(stationary_pose) or not cargo.has_meta("storage_owner") or cargo.collision_layer != 0 or not cargo.freeze or not is_zero_approx(cargo.gravity_scale) or is_instance_valid(household.held):
+        push_error("Stationary container did not secure moving/held cargo on closure")
         get_tree().quit(1)
         return
     test_prop.global_transform = Transform3D(Basis(Vector3.UP, 0.65), Vector3(1, 23, 0))
@@ -957,6 +968,28 @@ func _smoke() -> void:
         return
     cargo.linear_velocity = Vector3.ZERO
     cargo.angular_velocity = Vector3.ZERO
+    fridge.reset()
+    # Put a fixed small obstacle in the opening swing, without intersecting
+    # the closed cabinet. The door must stay commanded open and push back.
+    var hinge_probe: Node3D = fridge.panels[0]
+    var swing_point: Vector3 = hinge_probe.to_global(Basis(Vector3.UP, 0.45) * hinge_probe.local_box)
+    var hinge_wall := wall(world, swing_point + Vector3(0, 0, 0.04), Vector3(0.12, 0.24, 0.12))
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    var before_push := test_prop.global_position
+    hinge_probe.toggle()
+    for i in range(180):
+        fridge.step(1.0 / 60.0)
+        await get_tree().physics_frame
+        if not hinge_probe.busy:
+            break
+    if hinge_probe.goal < 1.6 or test_prop.global_position.distance_to(before_push) < 0.005:
+        push_error("Obstructed hinge cancelled or failed to move cabinet")
+        get_tree().quit(1)
+        return
+    hinge_wall.queue_free()
+    await get_tree().physics_frame
+    await get_tree().physics_frame
     fridge.reset()
     test_prop.global_transform = saved_fridge_transform
     await get_tree().physics_frame
