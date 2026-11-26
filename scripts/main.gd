@@ -605,16 +605,21 @@ func _physics_process(delta: float) -> void:
         var facing := household.held.global_position - player.global_position
         facing.y = 0.0
         if facing.length_squared() > 0.01:
-            visual.rotation.y = lerp_angle(visual.rotation.y, atan2(facing.x, facing.z), minf(1.0, delta * 14.0))
+            visual.rotation.y = rotate_toward(visual.rotation.y, atan2(facing.x, facing.z), deg_to_rad(420.0) * delta)
     elif direction.length() > 0.05:
-        visual.rotation.y = lerp_angle(visual.rotation.y, atan2(direction.x, direction.z), minf(1.0, delta * 14.0))
+        visual.rotation.y = rotate_toward(visual.rotation.y, atan2(direction.x, direction.z), deg_to_rad(420.0) * delta)
     if animator != null:
         var displacement := player.position - previous_position
         var ground_speed := Vector2(displacement.x, displacement.z).length() / maxf(delta, 0.001)
         var clip := walk if ground_speed > 0.08 and direction.length() > 0.05 else idle
         if clip != &"" and animator.current_animation != clip:
-            animator.play(clip, 0.12)
-        var playback := clampf(ground_speed / SPEED, 0.45, 1.10) if clip == walk else 1.0
+            animator.play(clip, 0.22)
+        var playback := 1.0
+        if clip == walk:
+            # Walk cadence remains walk-like even at the existing maximum
+            # gameplay speed. Do not turn a full joystick deflection into sprint.
+            var cycle := lerpf(1.35, 1.02, clampf(ground_speed / SPEED, 0.0, 1.0))
+            playback = clampf(animator.get_animation(walk).length / cycle, 0.25, 1.05)
         animator.advance(delta * playback)
         if avatar_ready:
             retargeter.apply_pose()
@@ -869,6 +874,11 @@ func _smoke() -> void:
         push_error("Stored item did not follow container transform")
         get_tree().quit(1)
         return
+    household.refresh_stored_outline()
+    if not household.stored_outline.meshes.has(cargo) or household.stored_outline.meshes.has(test_prop):
+        push_error("Outline must highlight stored cargo, not the container")
+        get_tree().quit(1)
+        return
     var cargo_record: Dictionary = fridge.storage.serialize_item(cargo)
     if str(cargo_record.get("slot", "")) != "fridge":
         push_error("Stored item save record missing compartment")
@@ -888,6 +898,11 @@ func _smoke() -> void:
         return
     cargo.freeze = true
     cargo.global_transform = cargo_original
+    household.refresh_stored_outline()
+    if household.stored_outline.meshes.has(cargo):
+        push_error("Removed cargo retained its stored-item outline")
+        get_tree().quit(1)
+        return
     cargo.linear_velocity = Vector3.ZERO
     cargo.angular_velocity = Vector3.ZERO
     fridge.reset()

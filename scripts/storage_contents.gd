@@ -9,16 +9,10 @@ const BODY_MASK := 11
 var body: RigidBody3D
 var compartments: Dictionary = {}
 var locked: Dictionary = {}
-var outline_material: ShaderMaterial
 
 func configure(owner_body: RigidBody3D) -> void:
     body = owner_body
     body.set_meta("object_type", "container")
-    var shader := Shader.new()
-    shader.code = "shader_type spatial; render_mode unshaded, depth_test_disabled, depth_draw_never, cull_disabled; void fragment() { ALBEDO = vec3(0.12, 0.95, 1.0); ALPHA = 0.95; }"
-    outline_material = ShaderMaterial.new()
-    outline_material.shader = shader
-    outline_material.render_priority = 120
 
 func register_compartment(id: String, volume: AABB, closure: HingeController) -> void:
     compartments[id] = {"volume": volume, "closure": closure}
@@ -137,31 +131,3 @@ func restore_item(item: RigidBody3D, record: Dictionary) -> bool:
         return false
     return lock_item(item, str(record.get("slot", "")), Transform3D(Basis.from_euler(local_rotation), local_position))
 
-func add_outline(parent: Node3D, center: Vector3, dimensions: Vector3) -> void:
-    # Draw only exterior edges, never a solid translucent box. Depth testing
-    # is disabled so the outline remains visible through walls and cargo.
-    var root := Node3D.new()
-    root.name = "ContainerOutline"
-    parent.add_child(root)
-    root.position = center
-    var half := dimensions * 0.5
-    var thickness := 0.009
-    for axis in range(3):
-        var a := (axis + 1) % 3
-        var b := (axis + 2) % 3
-        for sign_a in [-1.0, 1.0]:
-            for sign_b in [-1.0, 1.0]:
-                var at := Vector3.ZERO
-                at[a] = half[a] * sign_a
-                at[b] = half[b] * sign_b
-                var size := Vector3.ONE * thickness
-                size[axis] = dimensions[axis] + thickness
-                var mesh := BoxMesh.new()
-                mesh.size = size
-                var edge := MeshInstance3D.new()
-                edge.mesh = mesh
-                edge.material_override = outline_material
-                edge.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-                edge.set_meta("container_outline", true)
-                root.add_child(edge)
-                edge.position = at

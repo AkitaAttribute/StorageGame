@@ -122,9 +122,7 @@ func build(owner_body: RigidBody3D, size: Vector3) -> void:
     var upper_ceiling := top - t
     storage.register_compartment("fridge", AABB(Vector3(-interior_width * 0.5, lower_floor, interior_back), Vector3(interior_width, lower_ceiling - lower_floor, interior_depth)), panels[0])
     storage.register_compartment("freezer", AABB(Vector3(-interior_width * 0.5, upper_floor, interior_back), Vector3(interior_width, upper_ceiling - upper_floor, interior_depth)), panels[1])
-    storage.add_outline(self, Vector3(0, 0, cz), Vector3(w, h, cabinet_depth))
-    for panel in panels:
-        storage.add_outline(panel, panel.local_box, (panel.panel_shape.shape as BoxShape3D).size)
+
 
 func make_door(id: String, label: String, low: float, high: float, w: float, d: float, depth: float, steel: Material, liner: Material, dark: Material, handle: Material) -> void:
     var hinge := HingeController.new()

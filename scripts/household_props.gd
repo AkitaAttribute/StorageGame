@@ -2,6 +2,8 @@ extends Node3D
 ## Physics props, crosshair selection and gravity-free camera-directed grabbing.
 const Fridge = preload("res://scripts/interactive_fridge.gd")
 const StorageContents = preload("res://scripts/storage_contents.gd")
+const StoredOutline = preload("res://scripts/stored_outline.gd")
+var stored_outline: StoredOutline
 const HingedPanel = preload("res://scripts/hinged_panel.gd")
 const REACH := 2.1 # Three approximately 70 cm arm lengths.
 const PROP_LAYER := 2
@@ -83,6 +85,9 @@ func setup(body: CharacterBody3D, view: Camera3D, hud: Control, on_mobile: bool)
         button.pressed.connect(toggle_grab)
     button.hide()
     hud.add_child(button)
+    stored_outline = StoredOutline.new()
+    add_child(stored_outline)
+    stored_outline.setup(camera, hud)
 
 func mesh_bounds(root: Node3D) -> AABB:
     var bounds := AABB()
@@ -395,7 +400,7 @@ func set_highlight(body: RigidBody3D, enabled: bool) -> void:
         return
     for node in body.find_children("*", "MeshInstance3D", true, false):
         var mesh := node as MeshInstance3D
-        if not mesh.has_meta("container_outline"):
+        if not mesh.has_meta("stored_mask"):
             mesh.material_overlay = glow if enabled else null
 
 func select_at_crosshair() -> void:
@@ -587,6 +592,7 @@ func tick(delta: float) -> void:
         if storage != null:
             storage.tick(items, held)
     update_hold(delta)
+    refresh_stored_outline()
     select_at_crosshair()
     var active := is_instance_valid(held) or is_instance_valid(selected)
     button.visible = active
@@ -594,6 +600,24 @@ func tick(delta: float) -> void:
     if dot.active != active:
         dot.active = active
         dot.queue_redraw()
+
+func refresh_stored_outline() -> void:
+    var contained: Array[RigidBody3D] = []
+    for item in items:
+        if not is_instance_valid(item) or item.get_meta("object_type", "") == "container" or bool(item.get_meta("recovering", false)):
+            continue
+        if item.has_meta("storage_owner"):
+            contained.append(item)
+            continue
+        # Show items that are fully inside even before closing the door.
+        for owner in items:
+            if not is_instance_valid(owner) or owner == item:
+                continue
+            var storage := owner.get_node_or_null("StorageContents") as StorageContents
+            if storage != null and not storage.slot_for(item).is_empty():
+                contained.append(item)
+                break
+    stored_outline.sync(contained)
 
 func snapshot() -> Dictionary:
     var result := {}
