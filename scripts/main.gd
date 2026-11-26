@@ -874,7 +874,7 @@ func _smoke() -> void:
     fridge.panels[0].toggle()
     for i in range(65):
         fridge.step(1.0 / 60.0)
-            if fridge.panels[0].angle > 0.005 and cargo.has_meta("storage_owner"):
+        if fridge.panels[0].angle > 0.005 and cargo.has_meta("storage_owner"):
             push_error("Cargo secured before door fully closed")
             get_tree().quit(1)
             return
