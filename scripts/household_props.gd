@@ -6,7 +6,12 @@ const WORLD_MASK := 3
 const HOLD_SPEED_LIMIT := 14.0
 const PULL_GAIN := 12.0
 const PULL_ACCELERATION := 48.0
-const LAYOUT_VERSION := 3
+const LAYOUT_VERSION := 4
+const PROP_BOUNDARY_LAYER := 8
+const BODY_MASK := WORLD_MASK | PROP_BOUNDARY_LAYER
+const PLAYABLE_LIMIT := 29.5
+const MAX_PROP_HEIGHT := 18.0
+const MAX_SAFE_SPEED := 32.0
 # Verified locations from build 21. Only migrate unhandled props still at
 # these positions; an existing player's moved objects stay where they are.
 const LEGACY_POSITIONS := {
@@ -127,13 +132,19 @@ func build_item(definition: Dictionary) -> RigidBody3D:
     var body := RigidBody3D.new()
     body.name = str(definition["id"])
     body.mass = float(definition["mass"])
-    body.collision_layer = PROP_LAYER
-    body.collision_mask = WORLD_MASK
-    body.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+    # Construct the body without physics participation until it has a
+    # validated floor position. Never introduce collision at the world origin.
+    body.collision_layer = 0
+    body.collision_mask = 0
+    body.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
     body.freeze = true
     body.continuous_cd = true
     body.linear_damp = 0.1
     body.angular_damp = 0.65
+    var material := PhysicsMaterial.new()
+    material.bounce = 0.0
+    material.friction = 0.8
+    body.physics_material_override = material
     add_child(body)
     var art := Node3D.new()
     body.add_child(art)
@@ -173,6 +184,10 @@ func build_item(definition: Dictionary) -> RigidBody3D:
     collision.shape = shape
     collision.name = "PropCollision"
     body.add_child(collision)
+    if not dimensions.is_finite() or dimensions.x > 4.0 or dimensions.y > 3.0 or dimensions.z > 4.0:
+        push_error("Invalid normalized household prop dimensions: " + str(dimensions))
+        body.queue_free()
+        return null
     body.set_meta("dimensions", dimensions)
     body.set_meta("prop_id", definition["id"])
     return body
@@ -213,30 +228,18 @@ func visible_floor_position(body: RigidBody3D, at: Vector3) -> bool:
         var query := PhysicsRayQueryParameters3D.create(origin, target, 1, [body.get_rid(), player.get_rid()])
         if not get_world_3d().direct_space_state.intersect_ray(query).is_empty():
             return false
-    return not camera.is_position_behind(target)
+    return not camera.is_position_behind(target) and camera.is_position_in_frustum(target)
 
-func should_migrate_legacy(id: String, record: Dictionary, layout: int) -> bool:
-    if layout >= LAYOUT_VERSION or bool(record.get("moved", false)):
+func should_migrate_legacy(_id: String, record: Dictionary, layout: int) -> bool:
+    if layout >= LAYOUT_VERSION:
         return false
-    # The old desk was a lamp, and the old tool was hard to see. Re-place
-    # untouched items using the new actual geometry rather than old bounds.
-    if id == "desk_00" or id == "screwdriver_00":
+    # One-time recovery for the unstable earlier layout: relocate untouched
+    # items near the current character. Keep deliberately moved items if valid.
+    if not bool(record.get("moved", false)):
         return true
-    if not LEGACY_POSITIONS.has(id):
-        return false
-    var pos: Variant = record.get("position", [])
-    if not pos is Array or pos.size() != 3:
-        return false
-    var old := Vector2(float(pos[0]), float(pos[2]))
-    var initial: Vector3 = LEGACY_POSITIONS[id]
-    var current := Vector2(player.global_position.x, player.global_position.z)
-    return old.distance_to(Vector2(initial.x, initial.z)) < 0.35 and old.distance_to(current) > 4.0
+    return false
 
-func spawn_items(saved: Dictionary, layout: int = 0) -> void:
-    # Run after static collision shapes have entered the physics world.
-    await get_tree().physics_frame
-    await get_tree().physics_frame
-    var occupied: Array[AABB] = []
+func floor_candidates() -> Array[Vector3]:
     var candidates: Array[Vector3] = []
     # Start in front of the current saved character, not the New Game
     # spawn. The camera's horizontal forward vector defines the preferred area.
@@ -246,7 +249,7 @@ func spawn_items(saved: Dictionary, layout: int = 0) -> void:
     forward = forward.normalized()
     if forward.length_squared() < 0.001:
         forward = Vector3.FORWARD
-    for distance in [2.0, 2.8, 3.6, 4.8, 6.0, 8.0, 12.0, 16.0]:
+    for distance in [2.8, 3.6, 2.0, 4.8, 6.0, 8.0, 12.0, 16.0]:
         for degrees in [0, -25, 25, -50, 50, -75, 75, -100, 100, -125, 125, -150, 150, 180]:
             var point := center + forward.rotated(Vector3.UP, deg_to_rad(float(degrees))) * float(distance)
             if absf(point.x) < 27.0 and absf(point.z) < 27.0:
@@ -259,6 +262,39 @@ func spawn_items(saved: Dictionary, layout: int = 0) -> void:
             var point := Vector3(-10.4 + cos(angle) * float(distance), 0, 5.0 + sin(angle) * float(distance))
             if absf(point.x) < 27.0 and absf(point.z) < 27.0:
                 candidates.append(point)
+    return candidates
+
+func valid_world_position(at: Vector3) -> bool:
+    return at.is_finite() and absf(at.x) < PLAYABLE_LIMIT and absf(at.z) < PLAYABLE_LIMIT and at.y >= -0.10 and at.y < MAX_PROP_HEIGHT
+
+func find_floor_position(body: RigidBody3D, candidates: Array[Vector3], occupied: Array[AABB]) -> Vector3:
+    var dimensions: Vector3 = body.get_meta("dimensions")
+    for require_visible in [true, false]:
+        for point in candidates:
+            var y := ground_at(point, body, dimensions)
+            if not is_finite(y):
+                continue
+            var at := Vector3(point.x, y + dimensions.y * 0.5 + 0.025, point.z)
+            if not valid_world_position(at):
+                continue
+            if require_visible and not visible_floor_position(body, at):
+                continue
+            var bounds := AABB(at - dimensions * 0.5, dimensions)
+            var overlap := false
+            for prior in occupied:
+                if bounds.grow(0.22).intersects(prior):
+                    overlap = true
+                    break
+            if not overlap and clear_at(body, at):
+                return at
+    return Vector3.INF
+
+func spawn_items(saved: Dictionary, layout: int = 0) -> void:
+    # Run after static collision shapes have entered the physics world.
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    var occupied: Array[AABB] = []
+    var candidates := floor_candidates()
     for definition in DEFINITIONS:
         var body := build_item(definition)
         if body == null:
@@ -274,7 +310,7 @@ func spawn_items(saved: Dictionary, layout: int = 0) -> void:
             if pos is Array and rot is Array and pos.size() == 3 and rot.size() == 3:
                 var at := Vector3(float(pos[0]), float(pos[1]), float(pos[2]))
                 var angles := Vector3(float(rot[0]), float(rot[1]), float(rot[2]))
-                if at.is_finite() and angles.is_finite() and absf(at.x) < 29.0 and absf(at.z) < 29.0 and at.y > -1.0 and at.y < 20.0:
+                if valid_world_position(at) and angles.is_finite():
                     var restored_bounds := Transform3D(Basis.from_euler(angles), at) * AABB(-dimensions * 0.5, dimensions)
                     var overlap := false
                     for prior in occupied:
@@ -287,40 +323,29 @@ func spawn_items(saved: Dictionary, layout: int = 0) -> void:
                         occupied.append(restored_bounds)
                         placed = true
         if not placed:
-            # First pass: visible, nearby and unobstructed. Second pass:
-            # allow a clear but out-of-view location rather than intersecting
-            # existing facility geometry when the player is in a tight space.
-            for require_visible in [true, false]:
-                for point in candidates:
-                    var y := ground_at(point, body, dimensions)
-                    if not is_finite(y):
-                        continue
-                    var at := Vector3(point.x, y + dimensions.y * 0.5 + 0.025, point.z)
-                    if require_visible and not visible_floor_position(body, at):
-                        continue
-                    var bounds := AABB(at - dimensions * 0.5, dimensions)
-                    var overlap := false
-                    for prior in occupied:
-                        if bounds.grow(0.22).intersects(prior):
-                            overlap = true
-                            break
-                    if overlap or not clear_at(body, at):
-                        continue
-                    body.position = at
-                    occupied.append(bounds)
-                    placed = true
-                    break
-                if placed:
-                    break
+            var at := find_floor_position(body, candidates, occupied)
+            if at.is_finite():
+                body.position = at
+                body.rotation = Vector3.ZERO
+                occupied.append(AABB(at - dimensions * 0.5, dimensions))
+                body.set_meta("moved", false)
+                placed = true
         if not placed:
             push_error("No clear floor location for " + str(definition["id"]))
             body.queue_free()
             continue
-        items.append(body)
-        # Sync this body's new collision before searching for the next item.
+        body.set_meta("safe_position", body.global_position)
+        body.set_meta("safe_rotation", body.rotation)
+        body.linear_velocity = Vector3.ZERO
+        body.angular_velocity = Vector3.ZERO
+        # First sync the validated transform, then activate collision while
+        # frozen. Untouched props are static until their first grab.
         await get_tree().physics_frame
-        body.freeze = false
-        print("HOUSEHOLD_PROP ", body.name, " ", body.position, " player_distance=", body.global_position.distance_to(player.global_position))
+        body.collision_layer = PROP_LAYER
+        body.collision_mask = BODY_MASK
+        await get_tree().physics_frame
+        items.append(body)
+        print("HOUSEHOLD_PROP ", body.name, " ", body.position, " dimensions=", dimensions, " player_distance=", body.global_position.distance_to(player.global_position))
     placement_complete = true
 
 func ray_origin() -> Vector3:
@@ -359,7 +384,7 @@ func toggle_grab() -> void:
         grab(selected)
 
 func grab(body: RigidBody3D) -> void:
-    if not items.has(body) or is_instance_valid(held):
+    if not items.has(body) or is_instance_valid(held) or bool(body.get_meta("recovering", false)):
         return
     held = body
     held.set_meta("moved", true)
@@ -426,7 +451,61 @@ func update_hold(delta: float) -> void:
         return
     pull_toward(ray_origin() + ray_direction() * hold_distance, delta)
 
+# Bound recovery applies only to escaped or numerically unstable items, not
+# normal pulls. Normal motion always uses the rigid-body collision solver.
+func needs_recovery(body: RigidBody3D) -> bool:
+    if not valid_world_position(body.global_position):
+        return true
+    if not body.linear_velocity.is_finite() or not body.angular_velocity.is_finite():
+        return true
+    return body.linear_velocity.length() > MAX_SAFE_SPEED or body.angular_velocity.length() > 45.0
+
+func recover_item(body: RigidBody3D) -> void:
+    if bool(body.get_meta("recovering", false)):
+        return
+    body.set_meta("recovering", true)
+    if body == held:
+        drop()
+    if body == selected:
+        set_highlight(selected, false)
+        selected = null
+    body.freeze = true
+    body.collision_layer = 0
+    body.collision_mask = 0
+    body.linear_velocity = Vector3.ZERO
+    body.angular_velocity = Vector3.ZERO
+    var occupied: Array[AABB] = []
+    for other in items:
+        if other == body or not is_instance_valid(other) or not valid_world_position(other.global_position):
+            continue
+        var dimensions: Vector3 = other.get_meta("dimensions")
+        occupied.append(other.global_transform * AABB(-dimensions * 0.5, dimensions))
+    var at := find_floor_position(body, floor_candidates(), occupied)
+    if not at.is_finite():
+        # Don't place into a wall or floor if the player is confined.
+        # Hide the body while waiting for a free location.
+        body.hide()
+        body.set_meta("recovering", false)
+        return
+    body.global_transform = Transform3D(Basis.IDENTITY, at)
+    body.set_meta("safe_position", at)
+    body.set_meta("safe_rotation", Vector3.ZERO)
+    body.set_meta("moved", false)
+    body.gravity_scale = 1.0
+    body.show()
+    await get_tree().physics_frame
+    body.collision_layer = PROP_LAYER
+    body.collision_mask = BODY_MASK
+    await get_tree().physics_frame
+    body.set_meta("recovering", false)
+    locator_time = maxf(locator_time, 60.0)
+    print("HOUSEHOLD_RECOVERED ", body.name, " ", at)
+
 func tick(delta: float) -> void:
+    if placement_complete:
+        for body in items:
+            if is_instance_valid(body) and not bool(body.get_meta("recovering", false)) and (needs_recovery(body) or not body.visible):
+                recover_item(body)
     update_hold(delta)
     update_locator(delta)
     select_at_crosshair()
@@ -452,6 +531,9 @@ func update_locator(delta: float) -> void:
     for body in items:
         if not is_instance_valid(body):
             continue
+        if bool(body.get_meta("recovering", false)) or not body.visible or needs_recovery(body):
+            lines.append(str(body.get_meta("prop_id")).get_slice("_", 0).capitalize() + ": recovering...")
+            continue
         var offset := body.global_position - player.global_position
         offset.y = 0.0
         var direction := "ahead" if offset.dot(forward) >= 0.0 else "behind"
@@ -469,5 +551,10 @@ func snapshot() -> Dictionary:
             continue
         var pos := body.position
         var rot := body.rotation
+        if needs_recovery(body) or bool(body.get_meta("recovering", false)) or not body.visible:
+            pos = body.get_meta("safe_position", Vector3.ZERO)
+            rot = body.get_meta("safe_rotation", Vector3.ZERO)
+        if not valid_world_position(pos) or not rot.is_finite():
+            continue
         result[str(body.get_meta("prop_id"))] = {"position": [pos.x, pos.y, pos.z], "rotation": [rot.x, rot.y, rot.z], "moved": bool(body.get_meta("moved", false))}
     return result

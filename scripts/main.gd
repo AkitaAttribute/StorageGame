@@ -170,7 +170,18 @@ func start_game(data: Dictionary) -> void:
     ground.material_override = mat
     ground.position = Vector3(0, -0.13, 0)
     world.add_child(ground)
-    ground.create_trimesh_collision()
+    # A solid primitive floor gives small fast-moving rigid bodies reliable
+    # volume contact rather than depending on a thin triangle mesh.
+    wall(world, ground.position, slab.size)
+    # Invisible containment for physics props only. Player/camera behavior
+    # and facility appearance are unchanged.
+    for side in [-1.0, 1.0]:
+        var x_boundary := wall(world, Vector3(side * 30.25, 9.0, 0), Vector3(0.5, 20.0, 61.0))
+        x_boundary.collision_layer = HouseholdProps.PROP_BOUNDARY_LAYER
+        x_boundary.collision_mask = HouseholdProps.PROP_LAYER
+        var z_boundary := wall(world, Vector3(0, 9.0, side * 30.25), Vector3(61.0, 20.0, 0.5))
+        z_boundary.collision_layer = HouseholdProps.PROP_BOUNDARY_LAYER
+        z_boundary.collision_mask = HouseholdProps.PROP_LAYER
     var facility := model(FACILITY, world)
     add_static_mesh_collisions(facility)
     # Starter scene is static. An additional row uses the pack's actual
@@ -725,6 +736,29 @@ func _smoke() -> void:
         prop_wait += 1
     if household.items.size() != HouseholdProps.DEFINITIONS.size():
         push_error("Household prop placement failed")
+        get_tree().quit(1)
+        return
+    # Untouched items must actually remain at the placed floor locations,
+    # not merely exist at the instant the initialization test runs.
+    var initial_prop_positions: Array[Vector3] = []
+    for item in household.items:
+        initial_prop_positions.append(item.global_position)
+    for i in range(120):
+        await get_tree().physics_frame
+    for i in range(household.items.size()):
+        var item: RigidBody3D = household.items[i]
+        if not item.freeze or item.global_position.distance_to(initial_prop_positions[i]) > 0.01 or household.needs_recovery(item):
+            push_error("Untouched household prop drifted or escaped")
+            get_tree().quit(1)
+            return
+    # Force an invalid old position and verify recovery returns it to the
+    # playable floor without moving or deleting other items.
+    var lost: RigidBody3D = household.items[-1]
+    lost.global_position = Vector3(3736, -20, 0)
+    for i in range(12):
+        await get_tree().physics_frame
+    if household.needs_recovery(lost) or bool(lost.get_meta("recovering", false)) or not lost.visible or not lost.freeze or lost.collision_layer != HouseholdProps.PROP_LAYER:
+        push_error("Escaped prop recovery failed")
         get_tree().quit(1)
         return
     var test_prop: RigidBody3D = household.items[0]
