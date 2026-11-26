@@ -115,6 +115,15 @@ jobs:
           print("Verified updated Windows and Android binaries ignore older PCK updates.")
           PY
 
+      - name: Updater transaction smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          export XDG_DATA_HOME="$(mktemp -d)"
+          timeout 30s godot --headless --path . --script res://tools/updater_smoke.gd 2>&1 | tee /tmp/storage-updater-smoke.log
+          grep -F UPDATER_SMOKE_PASS /tmp/storage-updater-smoke.log
+          if grep -E 'SCRIPT ERROR:|Parse Error:|Compile Error:|ERROR:' /tmp/storage-updater-smoke.log; then exit 1; fi
+
       - name: Game and save-state smoke test
         shell: bash
         run: |

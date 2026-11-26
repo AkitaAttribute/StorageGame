@@ -630,9 +630,9 @@ func use_nearby() -> void:
     state["doors"][door["id"]] = opening
     save_game()
 
-func save_game() -> void:
+func save_game() -> bool:
     if not is_instance_valid(player) or state.is_empty():
-        return
+        return true
     var p := player.position
     state["position"] = [p.x, p.y, p.z]
     state["rotation"] = visual.rotation.y
@@ -640,6 +640,8 @@ func save_game() -> void:
     state["camera_pitch"] = camera_pitch
     if not Saves.write_slot(state):
         push_warning("Unable to write save slot.")
+        return false
+    return true
 
 func _notification(what: int) -> void:
     if what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_APPLICATION_PAUSED:
