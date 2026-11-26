@@ -16,7 +16,6 @@ const PCK_MAGIC := 0x43504447
 var _manifest_http: HTTPRequest
 var _download_http: HTTPRequest
 var _download_dialog: ConfirmationDialog
-var _install_dialog: ConfirmationDialog
 var _notice_dialog: AcceptDialog
 
 var _available_build := 0
@@ -57,13 +56,6 @@ func _ready() -> void:
     _download_dialog.cancel_button_text = "Later"
     _download_dialog.confirmed.connect(_begin_download)
     add_child(_download_dialog)
-
-    _install_dialog = ConfirmationDialog.new()
-    _install_dialog.title = "Storage Game Update"
-    _install_dialog.ok_button_text = "Install"
-    _install_dialog.cancel_button_text = "Later"
-    _install_dialog.confirmed.connect(_install_downloaded_pack)
-    add_child(_install_dialog)
 
     _notice_dialog = AcceptDialog.new()
     _notice_dialog.title = "Storage Game Update"
@@ -125,8 +117,8 @@ func _on_manifest_received(result: int, response_code: int, _headers: PackedStri
     _pending_url = url
     _pending_sha256 = sha
     _pending_size = size
-    _download_dialog.dialog_text = "preview build %d is available.\nInstalled build: %d.\n\nDownload this update?" % [build, _current_build]
-    _download_dialog.popup_centered(Vector2i(520, 230))
+    _download_dialog.dialog_text = "preview build %d is available.\nInstalled build: %d.\n\nDownload and install this update?\nThe game will close or restart automatically after success." % [build, _current_build]
+    _download_dialog.popup_centered(Vector2i(570, 270))
 
 func _begin_download() -> void:
     _download_retries = 0
@@ -168,12 +160,15 @@ func _on_pack_received(result: int, response_code: int, _headers: PackedStringAr
             return
         _show_notice("Update download failed (%d / HTTP %d).\n\nStorage Game will remain open. Reopen the game to check for a newer update." % [result, response_code])
         return
-    var verification_error := _verify_pending_pack()
-    if not verification_error.is_empty():
-        _show_notice(verification_error)
-        return
-    _install_dialog.dialog_text = "Build %d has been downloaded and verified.\n\nInstall it now? Storage Game will restart or close automatically after a successful installation." % _available_build
-    _install_dialog.popup_centered(Vector2i(550, 250))
+    # The initial Download click authorizes the complete update transaction.
+    # Installation revalidates the downloaded pack before committing anything.
+    _notice_dialog.title = "Storage Game Update"
+    _notice_dialog.dialog_text = "Verifying and installing build %d..." % _available_build
+    _notice_dialog.popup_centered(Vector2i(530, 200))
+    _notice_dialog.get_ok_button().hide()
+    # Render the installation status before doing file I/O.
+    await get_tree().process_frame
+    await _install_downloaded_pack()
 
 # Revalidate at install time too, rather than trusting an earlier download.
 func _verify_pending_pack() -> String:
