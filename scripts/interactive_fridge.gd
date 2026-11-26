@@ -30,6 +30,50 @@ func part(parent: Node3D, label: String, center: Vector3, size: Vector3, mat: Ma
         col.transform = body.global_transform.affine_inverse() * node.global_transform
     return node
 
+# A real visible hinge assembly: fixed cabinet leaf, interleaved barrel
+# knuckles, a pin on the rotation axis and a moving leaf fixed to the door.
+func hinge_cylinder(parent: Node3D, label: String, at: Vector3, radius: float, height: float, mat: Material) -> MeshInstance3D:
+    var mesh := CylinderMesh.new()
+    mesh.top_radius = radius
+    mesh.bottom_radius = radius
+    mesh.height = height
+    mesh.radial_segments = 20
+    var node := MeshInstance3D.new()
+    node.name = label
+    node.mesh = mesh
+    node.material_override = mat
+    parent.add_child(node)
+    node.position = at
+    return node
+
+func add_hinge_hardware(hinge: HingeController, door_height: float, depth: float, metal: Material, pin_metal: Material) -> void:
+    var fixed_hardware := Node3D.new()
+    fixed_hardware.name = hinge.panel_id.capitalize() + "CabinetHinges"
+    add_child(fixed_hardware)
+    fixed_hardware.position = hinge.position
+    var moving_hardware := Node3D.new()
+    moving_hardware.name = "DoorHinges"
+    hinge.add_child(moving_hardware)
+    var inset := minf(0.085, door_height * 0.20)
+    for index in range(2):
+        var y := (door_height * 0.5 - inset) * (-1.0 if index == 0 else 1.0)
+        # The fixed leaf extends back into the cabinet's front corner.
+        # The moving leaf extends along the door's side, rotating with it.
+        part(fixed_hardware, "CabinetLeaf%d" % index, Vector3(-0.010, y, -depth * 0.5), Vector3(0.026, 0.064, depth + 0.018), metal)
+        part(moving_hardware, "DoorLeaf%d" % index, Vector3(-0.035, y, 0.0), Vector3(0.070, 0.032, 0.012), metal)
+        # Fixed knuckles straddle a rotating center knuckle, leaving tiny
+        # manufacturing gaps; their cylindrical axes are exactly the pivot.
+        for end_sign in [-1.0, 1.0]:
+            hinge_cylinder(fixed_hardware, "FixedKnuckle", Vector3(0, y + end_sign * 0.022, 0), 0.014, 0.018, metal)
+        hinge_cylinder(moving_hardware, "MovingKnuckle%d" % index, Vector3(0, y, 0), 0.014, 0.022, metal)
+        hinge_cylinder(fixed_hardware, "Pin%d" % index, Vector3(0, y, 0), 0.007, 0.070, pin_metal)
+        for end_sign in [-1.0, 1.0]:
+            hinge_cylinder(fixed_hardware, "PinCap", Vector3(0, y + end_sign * 0.036, 0), 0.016, 0.004, pin_metal)
+        # Small fastener heads visibly attach the leaf to the cabinet.
+        for offset in [-0.020, 0.020]:
+            var screw := hinge_cylinder(fixed_hardware, "Fastener", Vector3(0.004, y + offset, -depth * 0.67), 0.005, 0.003, pin_metal)
+            screw.rotation.z = PI * 0.5
+
 func build(owner_body: RigidBody3D, size: Vector3) -> void:
     body = owner_body
     var steel := material(Color(0.88, 0.90, 0.91), 0.22, 0.39)
@@ -86,6 +130,8 @@ func make_door(id: String, label: String, low: float, high: float, w: float, d: 
     for side in [-1.0, 1.0]:
         part(hinge, "HandleMount", Vector3(grip_x, grip_y + side * (grip_length * 0.5 - 0.025), depth * 0.5 + 0.016), Vector3(0.035, 0.04, 0.032), handle)
     part(hinge, "Handle", Vector3(grip_x, grip_y, depth * 0.5 + 0.038), Vector3(0.028, grip_length, 0.023), handle)
+    var hinge_metal := material(Color(0.24, 0.27, 0.30), 0.7, 0.36)
+    add_hinge_hardware(hinge, height, depth, hinge_metal, handle)
     panels.append(hinge)
 
 func snapshot() -> Dictionary:

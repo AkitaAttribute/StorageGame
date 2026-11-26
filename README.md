@@ -27,3 +27,5 @@ Household physics stability: all new or recovered objects spawn with collision d
 
 ## Interactive containers
 The refrigerator is now a hollow original cabinet with upper freezer and lower fridge compartments, shelves, gaskets and separate right-hinged doors. Aim at either door within reach and use E (Windows) or its context Open/Close button (Android); G/Grab still moves the entire refrigerator. Each hinge has its own ray-selectable collision shape on the parent rigid body, obstruction-checked movement and saved angle. The reusable scripts/hinged_panel.gd supports future container doors and lids (vertical hinge axis in this first version). Doors do not animate during rapid cabinet movement.
+
+The refrigerator's two doors each have two modeled metal hinge assemblies: cabinet mounting leaves, rotating door leaves, interleaved barrel knuckles, pivot pins and fasteners. The hardware remains connected as each door rotates.

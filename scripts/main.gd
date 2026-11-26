@@ -815,6 +815,18 @@ func _smoke() -> void:
         push_error("Fridge door close affected the freezer")
         get_tree().quit(1)
         return
+    # The visible hinge pins are fixed to the cabinet, and the rotating
+    # center knuckles remain coaxial with them even at full opening.
+    for panel in fridge.panels:
+        var fixed_mount := fridge.get_node(panel.panel_id.capitalize() + "CabinetHinges") as Node3D
+        var moving_mount := panel.get_node("DoorHinges") as Node3D
+        for index in range(2):
+            var pin := fixed_mount.get_node("Pin%d" % index) as MeshInstance3D
+            var knuckle := moving_mount.get_node("MovingKnuckle%d" % index) as MeshInstance3D
+            if pin.global_position.distance_to(knuckle.global_position) > 0.001:
+                push_error("Refrigerator hinge hardware detached")
+                get_tree().quit(1)
+                return
     var hinge_state: Dictionary = fridge.snapshot()
     if float(hinge_state.get("freezer", 0.0)) < 1.6:
         push_error("Refrigerator hinge state not captured")
