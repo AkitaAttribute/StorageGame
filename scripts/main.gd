@@ -139,7 +139,7 @@ func named_animation(ap: AnimationPlayer, needle: String) -> StringName:
 func start_game(data: Dictionary) -> void:
     if is_instance_valid(world):
         return
-    for path in [FACILITY, UNIT, CHARACTER, AVATAR, "res://assets/prop_fridge.glb", "res://assets/prop_desk.glb"]:
+    for path in [FACILITY, UNIT, CHARACTER, AVATAR, "res://assets/prop_fridge.glb", "res://assets/prop_desk.glb", "res://assets/prop_screwdriver.glb", "res://assets/prop_boombox.glb"]:
         if not (ResourceLoader.load(path) is PackedScene):
             OS.alert("Run python tools/fetch_assets.py and import the project first.", "Missing model assets")
             return
@@ -720,7 +720,7 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     var prop_wait := 0
-    while household.items.size() < HouseholdProps.DEFINITIONS.size() and prop_wait < 60:
+    while not household.placement_complete and prop_wait < 120:
         await get_tree().physics_frame
         prop_wait += 1
     if household.items.size() != HouseholdProps.DEFINITIONS.size():
@@ -729,7 +729,7 @@ func _smoke() -> void:
         return
     var test_prop: RigidBody3D = household.items[0]
     household.grab(test_prop)
-    if not test_prop.freeze or not is_zero_approx(test_prop.gravity_scale):
+    if test_prop.freeze or not is_zero_approx(test_prop.gravity_scale):
         push_error("Grab did not disable gravity")
         get_tree().quit(1)
         return
@@ -740,13 +740,54 @@ func _smoke() -> void:
         push_error("Right-arm grab pose failed")
         get_tree().quit(1)
         return
-    household.release_velocity = Vector3(2, 1, 0)
+    var original_prop_position := test_prop.global_position
+    var original_prop_rotation := test_prop.rotation
+    test_prop.linear_velocity = Vector3.ZERO
+    household.pull_toward(original_prop_position + Vector3.UP * 2.0, 1.0 / 60.0)
+    if not test_prop.global_position.is_equal_approx(original_prop_position) or test_prop.linear_velocity.length() > 0.81:
+        push_error("Grab teleported or exceeded the pull acceleration limit")
+        get_tree().quit(1)
+        return
+    test_prop.linear_velocity = Vector3(2, 1, 0)
     household.drop()
     if test_prop.freeze or not is_equal_approx(test_prop.gravity_scale, 1.0) or not test_prop.linear_velocity.is_equal_approx(Vector3(2, 1, 0)):
         push_error("Drop did not restore gravity and momentum")
         get_tree().quit(1)
         return
     test_prop.linear_velocity = Vector3.ZERO
+    # Exercise the actual dynamic grab solver against a test floor and wall,
+    # isolated from the facility and the camera-driven main physics loop.
+    set_physics_process(false)
+    var pull_fixture := Node3D.new()
+    world.add_child(pull_fixture)
+    pull_fixture.position = Vector3(0, 24, 0)
+    wall(pull_fixture, Vector3(0, -0.2, 0), Vector3(8, 0.4, 8))
+    wall(pull_fixture, Vector3(2.0, 2.0, 0), Vector3(0.2, 4, 8))
+    var size: Vector3 = test_prop.get_meta("dimensions")
+    test_prop.freeze = true
+    test_prop.rotation = Vector3.ZERO
+    test_prop.global_position = pull_fixture.global_position + Vector3(0, size.y * 0.5 + 0.15, 0)
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    household.grab(test_prop)
+    for i in range(60):
+        household.pull_toward(pull_fixture.global_position + Vector3(4, -2, 0), 1.0 / 60.0)
+        await get_tree().physics_frame
+    var local_prop := pull_fixture.to_local(test_prop.global_position)
+    if local_prop.y < size.y * 0.5 - 0.035 or local_prop.x > 1.9 - size.x * 0.5 + 0.035:
+        push_error("Grab penetrated a solid floor or wall")
+        get_tree().quit(1)
+        return
+    household.drop()
+    test_prop.freeze = true
+    test_prop.global_position = original_prop_position
+    test_prop.rotation = original_prop_rotation
+    test_prop.linear_velocity = Vector3.ZERO
+    test_prop.angular_velocity = Vector3.ZERO
+    pull_fixture.queue_free()
+    await get_tree().physics_frame
+    test_prop.freeze = false
+    set_physics_process(true)
     var thigh: int = retargeter.target_keys["leftUpperLeg"]
     animator.play(walk)
     animator.advance(0.0)

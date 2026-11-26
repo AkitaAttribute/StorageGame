@@ -15,7 +15,7 @@ CACHE.mkdir(exist_ok=True)
 (CACHE / ".gdignore").touch()
 MODELS = {
     "prop_fridge.glb": ("https://raw.githubusercontent.com/trebeljahr/quaternius-showcase/0128ca510d653bb04d6d1e4885bd8890b5050b4f/public/glb/house_interior_pack/Kitchen_Fridge.glb", 17360, "b9fb5c84c574c12b307911ccac567a5369731560"),
-    "prop_desk.glb": ("https://raw.githubusercontent.com/trebeljahr/quaternius-showcase/0128ca510d653bb04d6d1e4885bd8890b5050b4f/public/glb/house_interior_pack/Light_Desk.glb", 12832, "0fe724c7eca875db0e7907b1598c861325490eb0"),
+    "prop_boombox.glb": ("https://raw.githubusercontent.com/KhronosGroup/glTF-Sample-Assets/e124e8d8d7330a5372bc2b4d00d39a4a9d7997ea/Models/BoomBox/glTF-Binary/BoomBox.glb", 10614184, "8d46a04283be023e3dd5154a4a8d65a68abf597c"),
     "facility.glb": ("https://cdn.3dassets.dev/assets/34733/v1/model.glb", 897836, None),
     "unit.glb": ("https://cdn.3dassets.dev/assets/34694/v1/model.glb", 26452, None),
     "shino.glb": ("https://raw.githubusercontent.com/madjin/vrm-samples/e16eb187100149a315ad92c3c9968f1d5baa6c7d/vroid/beta/Sendagaya_Shino.vrm", 15074328, "91f7c9e9ec990efb9de305e4c1d0e32a46498830"),
@@ -100,3 +100,53 @@ for filename, (url, size, git_sha) in MODELS.items():
         print("Godot-compatible model:", target.name, len(converted))
     else:
         shutil.copyfile(path, target)
+
+# Poly Haven publishes glTF with external texture/buffer dependencies.
+# Fetch its documented 1K asset set and bundle it as a self-contained GLB.
+# Verify the source-provided hashes and size of every downloaded dependency.
+import urllib.parse
+
+def get_bytes(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "StorageGame asset bootstrap (AkitaAttribute/StorageGame)"})
+    with urllib.request.urlopen(req, timeout=90) as response:
+        return response.read()
+
+def poly_file(info):
+    content = get_bytes(info["url"])
+    if info.get("size") is not None and len(content) != int(info["size"]):
+        raise RuntimeError("Poly Haven size verification failed: " + info["url"])
+    if info.get("md5") and hashlib.md5(content).hexdigest() != info["md5"].lower():
+        raise RuntimeError("Poly Haven checksum verification failed: " + info["url"])
+    return content
+
+def fetch_poly_model(asset_id, output):
+    listing = json.loads(get_bytes("https://api.polyhaven.com/files/" + asset_id))
+    info = listing["gltf"]["1k"]["gltf"]
+    folder = CACHE / ("polyhaven_" + asset_id)
+    folder.mkdir(exist_ok=True)
+    source = folder / (asset_id + "_1k.gltf")
+    source.write_bytes(poly_file(info))
+    for name, dep in info.get("include", {}).items():
+        dest = (folder / name).resolve()
+        if not dest.is_relative_to(folder.resolve()):
+            raise RuntimeError("Invalid asset dependency path")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(poly_file(dep))
+    npx = shutil.which("npx.cmd" if __import__("os").name == "nt" else "npx")
+    if not npx:
+        raise RuntimeError("Node.js and npx are required to bundle textured models")
+    target = ASSETS / output
+    subprocess.run([npx, "--yes", "@gltf-transform/cli@4.5.1", "copy", str(source), str(target)], check=True)
+    raw = target.read_bytes()
+    length, kind = struct.unpack_from("<II", raw, 12)
+    doc = json.loads(raw[20:20+length])
+    if kind != 0x4E4F534A or not doc.get("meshes") or not doc.get("textures"):
+        raise RuntimeError("Expected textured mesh: " + asset_id)
+    if "KHR_mesh_quantization" in doc.get("extensionsUsed", []) or "KHR_mesh_quantization" in doc.get("extensionsRequired", []):
+        temp = folder / "dequantized.glb"
+        subprocess.run([npx, "--yes", "@gltf-transform/cli@4.5.1", "dequantize", str(target), str(temp)], check=True)
+        shutil.copyfile(temp, target)
+    print("Poly Haven textured asset:", asset_id, target.stat().st_size)
+
+fetch_poly_model("metal_office_desk", "prop_desk.glb")
+fetch_poly_model("flathead_screwdriver", "prop_screwdriver.glb")

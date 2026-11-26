@@ -3,8 +3,10 @@ extends Node3D
 const REACH := 2.1 # Three approximately 70 cm arm lengths.
 const PROP_LAYER := 2
 const WORLD_MASK := 3
-const HOLD_SPEED_LIMIT := 22.0
-const LAYOUT_VERSION := 2
+const HOLD_SPEED_LIMIT := 14.0
+const PULL_GAIN := 12.0
+const PULL_ACCELERATION := 48.0
+const LAYOUT_VERSION := 3
 # Verified locations from build 21. Only migrate unhandled props still at
 # these positions; an existing player's moved objects stay where they are.
 const LEGACY_POSITIONS := {
@@ -15,7 +17,8 @@ const LEGACY_POSITIONS := {
 const DEFINITIONS := [
     {"id": "fridge_00", "asset": "res://assets/prop_fridge.glb", "height": 1.75, "mass": 65.0},
     {"id": "desk_00", "asset": "res://assets/prop_desk.glb", "height": 0.78, "mass": 22.0},
-    {"id": "screwdriver_00", "asset": "", "height": 0.036, "mass": 0.18},
+    {"id": "screwdriver_00", "asset": "res://assets/prop_screwdriver.glb", "length": 0.28, "mass": 0.18},
+    {"id": "boombox_00", "asset": "res://assets/prop_boombox.glb", "height": 0.30, "mass": 3.0},
 ]
 var player: CharacterBody3D
 var camera: Camera3D
@@ -23,14 +26,16 @@ var items: Array[RigidBody3D] = []
 var selected: RigidBody3D
 var held: RigidBody3D
 var hold_distance := 4.0
-var release_velocity := Vector3.ZERO
+var previous_linear_damp := 0.1
+var previous_angular_damp := 0.65
+var previous_lock_rotation := false
 var glow: StandardMaterial3D
 var dot: Crosshair
 var button: Button
 var mobile := false
 var desired_position := Vector3.ZERO
 var locator: Label
-var locator_time := 22.0
+var locator_time := 60.0
 var placement_complete := false
 
 class Crosshair:
@@ -132,23 +137,36 @@ func build_item(definition: Dictionary) -> RigidBody3D:
     add_child(body)
     var art := Node3D.new()
     body.add_child(art)
+    var model_root := Node3D.new()
+    art.add_child(model_root)
     var asset := str(definition["asset"])
     if asset.is_empty():
-        screwdriver(art)
+        screwdriver(model_root)
     else:
         var scene := load(asset) as PackedScene
         if scene == null:
             body.queue_free()
             return null
-        art.add_child(scene.instantiate())
+        model_root.add_child(scene.instantiate())
     var bounds := mesh_bounds(art)
     if bounds.size.y <= 0.0001:
         body.queue_free()
         return null
-    var scale_factor := float(definition["height"]) / bounds.size.y
+    var scale_factor := 1.0
+    if definition.has("length"):
+        # Tools may be exported standing upright; lay their longest axis flat.
+        if bounds.size.y > maxf(bounds.size.x, bounds.size.z):
+            model_root.rotation.z = PI * 0.5
+            bounds = mesh_bounds(art)
+        scale_factor = float(definition["length"]) / maxf(bounds.size.x, bounds.size.z)
+    else:
+        scale_factor = float(definition["height"]) / bounds.size.y
     art.scale = Vector3.ONE * scale_factor
     art.position = -bounds.get_center() * scale_factor
-    var dimensions := (bounds.size * scale_factor).max(Vector3(0.025, 0.025, 0.025))
+    # A minimum collision thickness prevents thin tools tunneling or sinking
+    # into the ground; their original visual proportions remain unchanged.
+    var minimum := Vector3(0.025, 0.05, 0.025) if definition.has("length") else Vector3(0.025, 0.025, 0.025)
+    var dimensions := (bounds.size * scale_factor).max(minimum)
     var shape := BoxShape3D.new()
     shape.size = dimensions
     var collision := CollisionShape3D.new()
@@ -198,7 +216,13 @@ func visible_floor_position(body: RigidBody3D, at: Vector3) -> bool:
     return not camera.is_position_behind(target)
 
 func should_migrate_legacy(id: String, record: Dictionary, layout: int) -> bool:
-    if layout >= LAYOUT_VERSION or bool(record.get("moved", false)) or not LEGACY_POSITIONS.has(id):
+    if layout >= LAYOUT_VERSION or bool(record.get("moved", false)):
+        return false
+    # The old desk was a lamp, and the old tool was hard to see. Re-place
+    # untouched items using the new actual geometry rather than old bounds.
+    if id == "desk_00" or id == "screwdriver_00":
+        return true
+    if not LEGACY_POSITIONS.has(id):
         return false
     var pos: Variant = record.get("position", [])
     if not pos is Array or pos.size() != 3:
@@ -339,22 +363,26 @@ func grab(body: RigidBody3D) -> void:
         return
     held = body
     held.set_meta("moved", true)
-    locator_time = 0.0
     set_highlight(selected, false)
     selected = null
-    held.freeze = true
+    # Remain a dynamic rigid body with normal collision masks, contact solver
+    # and CCD. Never move the transform directly during a grab.
+    previous_linear_damp = held.linear_damp
+    previous_angular_damp = held.angular_damp
+    previous_lock_rotation = held.lock_rotation
+    held.freeze = false
+    held.sleeping = false
     held.gravity_scale = 0.0
-    held.linear_velocity = Vector3.ZERO
+    held.linear_damp = 0.0
+    held.angular_damp = 6.0
     held.angular_velocity = Vector3.ZERO
-    held.add_collision_exception_with(player)
-    player.add_collision_exception_with(held)
+    held.lock_rotation = true
     # Keep the grabbed object beyond the character rather than pulling it
     # into their chest as soon as the crosshair hits its near face.
     var dimensions: Vector3 = held.get_meta("dimensions")
     var extent := Vector2(dimensions.x, dimensions.z).length() * 0.5
     hold_distance = maxf((held.global_position - ray_origin()).dot(ray_direction()), camera.global_position.distance_to(player.global_position + Vector3.UP * 1.1) + extent + 0.42)
     hold_distance = minf(hold_distance, 6.0)
-    release_velocity = Vector3.ZERO
     desired_position = held.global_position
     set_highlight(held, true)
 
@@ -365,35 +393,38 @@ func drop() -> void:
     held = null
     set_highlight(body, false)
     body.gravity_scale = 1.0
-    body.remove_collision_exception_with(player)
-    player.remove_collision_exception_with(body)
-    body.freeze = false
+    body.linear_damp = previous_linear_damp
+    body.angular_damp = previous_angular_damp
+    body.lock_rotation = previous_lock_rotation
     body.sleeping = false
-    body.linear_velocity = release_velocity.limit_length(HOLD_SPEED_LIMIT)
-    release_velocity = Vector3.ZERO
+    # Keep the velocity that the actual physics solver allowed, not the
+    # unfulfilled target velocity into a wall. No artificial throw impulse.
+
+func pull_toward(target_position: Vector3, delta: float) -> void:
+    if not is_instance_valid(held):
+        return
+    desired_position = target_position
+    var error := target_position - held.global_position
+    var target_velocity := (error * PULL_GAIN).limit_length(HOLD_SPEED_LIMIT)
+    var next_velocity := held.linear_velocity.move_toward(target_velocity, PULL_ACCELERATION * delta)
+    # Limit motion toward a blocking surface using the exact rigid-body
+    # collision shape and physics-engine sweep; preserve tangential movement
+    # so a prop can slide along the floor or wall. Solver + CCD remain active.
+    var motion := next_velocity * delta
+    if motion.length_squared() > 0.0000001:
+        var hit := KinematicCollision3D.new()
+        if held.test_move(held.global_transform, motion, hit, 0.002):
+            var normal := hit.get_normal()
+            var into := next_velocity.dot(normal)
+            if into < 0.0:
+                next_velocity -= normal * into
+    held.linear_velocity = next_velocity
+    held.sleeping = false
 
 func update_hold(delta: float) -> void:
     if not is_instance_valid(held):
         return
-    var start := held.global_position
-    desired_position = ray_origin() + ray_direction() * hold_distance
-    var motion := desired_position - start
-    # No spring, mass-dependent lag or gravity. Sweep only to prevent passing
-    # through physical walls and other props while the item is being carried.
-    var col := held.get_node("PropCollision") as CollisionShape3D
-    var query := PhysicsShapeQueryParameters3D.new()
-    query.shape = col.shape
-    query.transform = held.global_transform
-    query.motion = motion
-    query.collision_mask = WORLD_MASK
-    query.exclude = [held.get_rid(), player.get_rid()]
-    var fraction := get_world_3d().direct_space_state.cast_motion(query)
-    if fraction.size() >= 2 and fraction[0] < 1.0:
-        motion *= maxf(0.0, fraction[0] - 0.002)
-    held.global_position = start + motion
-    var actual := motion / maxf(delta, 0.001)
-    # Preserve recent camera/player-driven velocity when released.
-    release_velocity = release_velocity.lerp(actual.limit_length(HOLD_SPEED_LIMIT), 1.0 - exp(-delta * 22.0))
+    pull_toward(ray_origin() + ray_direction() * hold_distance, delta)
 
 func tick(delta: float) -> void:
     update_hold(delta)
