@@ -1006,15 +1006,25 @@ func _smoke() -> void:
     hinge_probe.toggle()
     var max_lift := 0.0
     var max_tilt := 0.0
-    for i in range(240):
+    var paused_ticks := 0
+    var previous_angle: float = hinge_probe.angle
+    var elapsed_ticks := 0
+    for i in range(120):
         fridge.step(1.0 / 60.0)
+        elapsed_ticks += 1
+        if absf(float(hinge_probe.angle) - previous_angle) < 0.0001 and hinge_probe.busy:
+            paused_ticks += 1
+        previous_angle = hinge_probe.angle
         await get_tree().physics_frame
         max_lift = maxf(max_lift, test_prop.global_position.y - face_start.origin.y)
         max_tilt = maxf(max_tilt, face_start.basis.get_rotation_quaternion().angle_to(test_prop.global_transform.basis.get_rotation_quaternion()))
         if not hinge_probe.busy:
             break
-    if hinge_probe.goal < 1.6 or test_prop.freeze or max_lift < 0.008 or max_tilt < 0.015:
-        push_error("Face-down hinge failed to lift and tilt cabinet: lift=%f tilt=%f" % [max_lift, max_tilt])
+    print("HINGE_FACE_DOWN ticks=", elapsed_ticks, " paused=", paused_ticks, " lift=", max_lift, " tilt=", max_tilt)
+    # A free door needs 53 ticks at 60 Hz. Allow a small tolerance for
+    # transient solver contacts, but reject the old push/wait behavior.
+    if hinge_probe.busy or hinge_probe.angle < 1.82 or test_prop.freeze or max_lift < 0.008 or max_tilt < 0.015 or elapsed_ticks > 63 or paused_ticks > 10:
+        push_error("Face-down hinge failed continuous opening: ticks=%d pauses=%d lift=%f tilt=%f" % [elapsed_ticks, paused_ticks, max_lift, max_tilt])
         get_tree().quit(1)
         return
     face_floor.queue_free()
