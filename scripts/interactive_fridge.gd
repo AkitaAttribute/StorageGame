@@ -1,8 +1,8 @@
 extends Node3D
 ## Original refrigerator geometry: an open cabinet, two compartments,
 ## independently hinged doors, and a compound collider on the parent body.
-const Panel = preload("res://scripts/hinged_panel.gd")
-var panels: Array[Panel] = []
+const HingeController = preload("res://scripts/hinged_panel.gd")
+var panels: Array[HingeController] = []
 var body: RigidBody3D
 
 func material(color: Color, metallic: float, roughness: float) -> StandardMaterial3D:
@@ -65,7 +65,7 @@ func build(owner_body: RigidBody3D, size: Vector3) -> void:
     make_door("freezer", "freezer", split + 0.012, top - 0.008, w, d, door_depth, steel, liner, dark, handle)
 
 func make_door(id: String, label: String, low: float, high: float, w: float, d: float, depth: float, steel: Material, liner: Material, dark: Material, handle: Material) -> void:
-    var hinge := Panel.new()
+    var hinge := HingeController.new()
     hinge.name = id.capitalize() + "Hinge"
     add_child(hinge)
     var width := w - 0.014
