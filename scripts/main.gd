@@ -859,13 +859,31 @@ func _smoke() -> void:
     var cargo_original := cargo.global_transform
     var lower_volume: AABB = fridge.storage.compartments["fridge"]["volume"]
     var cargo_dimensions: Vector3 = cargo.get_meta("dimensions")
-    # Put the screwdriver entirely inside the bottom shelf compartment.
-    var cargo_local := Transform3D(Basis.IDENTITY, Vector3(0, lower_volume.position.y + cargo_dimensions.y * 0.5 + 0.02, lower_volume.get_center().z))
+    # Place cargo with the door open and the cabinet stationary. Include
+    # a realistic 6 mm floor contact offset (the old inset rejected it).
+    fridge.panels[0].apply_angle(1.7)
+    fridge.storage.tick(household.items, null)
+    var cargo_local := Transform3D(Basis.IDENTITY, Vector3(0, lower_volume.position.y + cargo_dimensions.y * 0.5 - 0.006, lower_volume.get_center().z))
+    cargo.freeze = true
     cargo.global_transform = test_prop.global_transform * cargo_local
     await get_tree().physics_frame
     fridge.storage.tick(household.items, null)
-    if not cargo.has_meta("storage_owner") or cargo.collision_layer != 0 or not cargo.freeze:
-        push_error("Closed container did not secure its contents")
+    if cargo.has_meta("storage_owner"):
+        push_error("Open compartment secured cargo prematurely")
+        get_tree().quit(1)
+        return
+    var stationary_pose := test_prop.global_transform
+    fridge.panels[0].toggle()
+    for i in range(65):
+        fridge.step(1.0 / 60.0)
+        fridge.storage.tick(household.items, null)
+        if fridge.panels[0].angle > 0.005 and cargo.has_meta("storage_owner"):
+            push_error("Cargo secured before door fully closed")
+            get_tree().quit(1)
+            return
+        await get_tree().physics_frame
+    if not test_prop.global_transform.is_equal_approx(stationary_pose) or not cargo.has_meta("storage_owner") or cargo.collision_layer != 0 or not cargo.freeze or not is_zero_approx(cargo.gravity_scale):
+        push_error("Stationary container did not secure cargo on closure")
         get_tree().quit(1)
         return
     test_prop.global_transform = Transform3D(Basis(Vector3.UP, 0.65), Vector3(1, 23, 0))

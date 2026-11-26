@@ -113,9 +113,11 @@ func build(owner_body: RigidBody3D, size: Vector3) -> void:
     storage.name = "StorageContents"
     body.add_child(storage)
     storage.configure(body)
+    # Match actual inner surfaces rather than an inset volume that
+    # rejects items resting against the liner or cabinet back.
     var interior_width := w - 2.0 * t - 0.016
-    var interior_depth := cabinet_depth - t - 0.014
-    var interior_back := rear + t + 0.003
+    var interior_depth := cabinet_depth - t
+    var interior_back := rear + t
     var lower_floor := bottom + t
     var lower_ceiling := split - t * 0.5
     var upper_floor := split + t * 0.5

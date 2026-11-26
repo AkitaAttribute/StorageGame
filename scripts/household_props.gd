@@ -589,7 +589,9 @@ func tick(delta: float) -> void:
         if not is_instance_valid(item) or bool(item.get_meta("recovering", false)):
             continue
         var storage := item.get_node_or_null("StorageContents") as StorageContents
-        if storage != null:
+        if storage != null and placement_complete:
+            # Door animation was advanced above, so a newly shut door
+            # secures cargo in this very physics frame, before any pull.
             storage.tick(items, held)
     update_hold(delta)
     refresh_stored_outline()

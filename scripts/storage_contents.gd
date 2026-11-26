@@ -9,6 +9,9 @@ const BODY_MASK := 11
 var body: RigidBody3D
 var compartments: Dictionary = {}
 var locked: Dictionary = {}
+# Track the fully closed transition independently of cabinet velocity.
+var closed_state: Dictionary = {}
+const CONTACT_TOLERANCE := 0.015
 
 func configure(owner_body: RigidBody3D) -> void:
     body = owner_body
@@ -16,6 +19,7 @@ func configure(owner_body: RigidBody3D) -> void:
 
 func register_compartment(id: String, volume: AABB, closure: HingeController) -> void:
     compartments[id] = {"volume": volume, "closure": closure}
+    closed_state[id] = false
 
 func is_closed(id: String) -> bool:
     if not compartments.has(id):
@@ -35,7 +39,12 @@ func fits(id: String, local_pose: Transform3D, dimensions: Vector3) -> bool:
     # Entire item, not just its origin, must fit inside the cabinet.
     var volume: AABB = compartments[id]["volume"]
     var extents := local_pose * AABB(-dimensions * 0.5, dimensions)
-    return volume.grow(0.003).encloses(extents)
+    # Contact offsets can leave a resting rigid body a few millimeters
+    # inside the floor or side wall. Accept that contact, not an object
+    # protruding through the doorway. The front face is +Z.
+    var minimum := volume.position - Vector3.ONE * CONTACT_TOLERANCE
+    var maximum := volume.end + Vector3(CONTACT_TOLERANCE, CONTACT_TOLERANCE, 0.006)
+    return extents.position.x >= minimum.x and extents.position.y >= minimum.y and extents.position.z >= minimum.z and extents.end.x <= maximum.x and extents.end.y <= maximum.y and extents.end.z <= maximum.z
 
 func slot_for(item: RigidBody3D) -> String:
     var dimensions: Vector3 = item.get_meta("dimensions", Vector3.ZERO)
@@ -51,15 +60,9 @@ func lock_item(item: RigidBody3D, id: String, local_pose: Transform3D) -> bool:
     var dimensions: Vector3 = item.get_meta("dimensions", Vector3.ZERO)
     if not is_closed(id) or not fits(id, local_pose, dimensions):
         return false
-    var bounds := local_pose * AABB(-dimensions * 0.5, dimensions)
-    for other in locked:
-        if not is_instance_valid(other):
-            continue
-        var other_pose: Transform3D = locked[other]["local"]
-        var other_dimensions: Vector3 = other.get_meta("dimensions")
-        var other_bounds := other_pose * AABB(-other_dimensions * 0.5, other_dimensions)
-        if bounds.grow(-0.004).intersects(other_bounds.grow(-0.004)):
-            return false
+    # Live contents have already been separated by the physics solver.
+    # Overlapping axis-aligned bounds are not evidence of mesh intersection
+    # (e.g. two angled tools), and must not prevent securing either item.
     locked[item] = {"slot": id, "local": local_pose}
     item.set_meta("storage_owner", self)
     item.set_meta("moved", true)
@@ -105,12 +108,22 @@ func tick(items: Array[RigidBody3D], held: RigidBody3D) -> void:
     for item in locked.keys():
         if is_open(str(locked[item]["slot"])):
             release_item(item)
-    for item in items:
-        if not is_instance_valid(item) or item == body or item == held or item.has_meta("storage_owner") or bool(item.get_meta("recovering", false)):
+    # Capture precisely on the first physics tick at full closure (or
+    # initial saved-world reconciliation). Never wait for the cabinet to
+    # move, and never repeatedly adopt an object through a closed door.
+    for id in compartments:
+        var slot := str(id)
+        var closed_now := is_closed(slot)
+        var just_closed := closed_now and not bool(closed_state.get(slot, false))
+        closed_state[slot] = closed_now
+        if not just_closed:
             continue
-        var slot := slot_for(item)
-        if not slot.is_empty() and is_closed(slot):
-            lock_item(item, slot, body.global_transform.affine_inverse() * item.global_transform)
+        for item in items:
+            if not is_instance_valid(item) or item == body or item == held or item.has_meta("storage_owner") or bool(item.get_meta("recovering", false)):
+                continue
+            var relative := body.global_transform.affine_inverse() * item.global_transform
+            if fits(slot, relative, item.get_meta("dimensions", Vector3.ZERO)):
+                lock_item(item, slot, relative)
 
 func serialize_item(item: RigidBody3D) -> Dictionary:
     if not locked.has(item):
