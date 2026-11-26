@@ -731,6 +731,18 @@ func _smoke() -> void:
         push_error("Roll-up door close regression")
         get_tree().quit(1)
         return
+    # Closed slats must overlap instead of leaving see-through seams.
+    for i in range(rollup_unit.slats.size() - 1):
+        var lower := rollup_unit.slats[i] as Node3D
+        var upper := rollup_unit.slats[i + 1] as Node3D
+        var lower_sheet := (lower.get_child(0) as MeshInstance3D).mesh as BoxMesh
+        var upper_sheet := (upper.get_child(0) as MeshInstance3D).mesh as BoxMesh
+        var lower_top := lower.position.y + lower_sheet.size.y * 0.5
+        var upper_bottom := upper.position.y - upper_sheet.size.y * 0.5
+        if lower_top <= upper_bottom:
+            push_error("Closed roll-up curtain has a visible gap")
+            get_tree().quit(1)
+            return
     # Independent collision fixture above the facility: one ordinary stair
     # riser and one full wall. Exercise the same sweep used during gameplay.
     var fixture := Node3D.new()

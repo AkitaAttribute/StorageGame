@@ -56,7 +56,7 @@ func collision_box(parent: Node3D, at: Vector3, size: Vector3) -> StaticBody3D:
 
 func build(height: float, initially_open: bool) -> void:
     unit_height = height
-    # Match exterior height; reserve a headroom bay under the roof.
+    # Match exterior height; reserve clearance for the winding barrel under the roof.
     var cavity := clampf(unit_height * 0.19, 0.38, 0.55)
     clear_height = unit_height - cavity
     radius = cavity * 0.39
@@ -68,7 +68,7 @@ func build(height: float, initially_open: bool) -> void:
     var panel := metal(Color(0.18, 0.37, 0.58), 0.48, 0.38)
     var ribs := metal(Color(0.22, 0.43, 0.64), 0.48, 0.38)
     var concrete := metal(Color(0.48, 0.49, 0.49), 0.0, 0.9)
-    # Walkable floor, separate interior ceiling, and a sealed roof.
+    # Walkable floor and a single sealed roof. The winding barrel remains exposed inside.
     box(self, Vector3(0, 0.0, 0), Vector3(WIDTH, 0.05, DEPTH), concrete, true)
     for side in [-1.0, 1.0]:
         box(self, Vector3(side * 1.46, unit_height * 0.5, 0), Vector3(0.08, unit_height, DEPTH), siding, true)
@@ -80,10 +80,6 @@ func build(height: float, initially_open: bool) -> void:
         box(self, Vector3(side * 1.38, clear_height + radius * 0.48, FRONT - radius), Vector3(0.055, cavity * 0.78, radius * 2.2), trim)
     box(self, Vector3(0, unit_height * 0.5, -1.46), Vector3(WIDTH, unit_height, 0.08), siding, true)
     box(self, Vector3(0, unit_height - 0.04, 0), Vector3(WIDTH, 0.08, DEPTH), trim, true)
-    # Ceiling ends behind the barrel, leaving the winding bay unobstructed.
-    var ceiling_end := FRONT - 2.0 * radius - 0.12
-    var ceiling_depth := ceiling_end + 1.42
-    box(self, Vector3(0, clear_height + 0.015, -1.42 + ceiling_depth * 0.5), Vector3(2.84, 0.03, ceiling_depth), siding, true)
     box(self, Vector3(0, clear_height + cavity * 0.5, 1.49), Vector3(WIDTH, cavity, 0.025), siding, true)
     box(self, Vector3(0, clear_height + 0.025, 1.49), Vector3(WIDTH, 0.05, 0.04), trim)
     var drum := CylinderMesh.new()
@@ -102,8 +98,9 @@ func build(height: float, initially_open: bool) -> void:
         var slat := Node3D.new()
         slat.name = "CurtainSlat%02d" % i
         add_child(slat)
-        # Thin painted metal with a raised horizontal corrugation and seam.
-        box(slat, Vector3.ZERO, Vector3(2.71, slat_pitch * 0.98, 0.015), panel)
+        # Slightly overlapping painted steel sheets seal the sightline between slats.
+        # Retain the original pitch, ribs and winding path; only the sheet grows.
+        box(slat, Vector3.ZERO, Vector3(2.71, slat_pitch * 1.08, 0.015), panel)
         box(slat, Vector3(0, 0, 0.013), Vector3(2.71, slat_pitch * 0.38, 0.016), ribs)
         box(slat, Vector3(0, -slat_pitch * 0.45, 0.006), Vector3(2.71, 0.008, 0.018), trim)
         slats.append(slat)
