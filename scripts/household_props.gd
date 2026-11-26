@@ -4,6 +4,14 @@ const REACH := 2.1 # Three approximately 70 cm arm lengths.
 const PROP_LAYER := 2
 const WORLD_MASK := 3
 const HOLD_SPEED_LIMIT := 22.0
+const LAYOUT_VERSION := 2
+# Verified locations from build 21. Only migrate unhandled props still at
+# these positions; an existing player's moved objects stay where they are.
+const LEGACY_POSITIONS := {
+    "fridge_00": Vector3(-8.4, 0.9, 5.0),
+    "desk_00": Vector3(-9.4, 0.385, 6.732051),
+    "screwdriver_00": Vector3(-8.667949, 0.043, 6.0),
+}
 const DEFINITIONS := [
     {"id": "fridge_00", "asset": "res://assets/prop_fridge.glb", "height": 1.75, "mass": 65.0},
     {"id": "desk_00", "asset": "res://assets/prop_desk.glb", "height": 0.78, "mass": 22.0},
@@ -21,6 +29,9 @@ var dot: Crosshair
 var button: Button
 var mobile := false
 var desired_position := Vector3.ZERO
+var locator: Label
+var locator_time := 22.0
+var placement_complete := false
 
 class Crosshair:
     extends Control
@@ -60,6 +71,14 @@ func setup(body: CharacterBody3D, view: Camera3D, hud: Control, on_mobile: bool)
         button.pressed.connect(toggle_grab)
     button.hide()
     hud.add_child(button)
+    locator = Label.new()
+    locator.mouse_filter = Control.MOUSE_FILTER_IGNORE
+    locator.position = Vector2(22, 18)
+    locator.add_theme_font_size_override("font_size", 17)
+    locator.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.95))
+    locator.add_theme_constant_override("shadow_offset_x", 2)
+    locator.add_theme_constant_override("shadow_offset_y", 2)
+    hud.add_child(locator)
 
 func mesh_bounds(root: Node3D) -> AABB:
     var bounds := AABB()
@@ -167,17 +186,53 @@ func clear_at(body: RigidBody3D, position: Vector3, basis: Basis = Basis.IDENTIT
     query.exclude = [body.get_rid()]
     return get_world_3d().direct_space_state.intersect_shape(query, 1).is_empty()
 
-func spawn_items(saved: Dictionary) -> void:
+func visible_floor_position(body: RigidBody3D, at: Vector3) -> bool:
+    # The object must be approachable from the player without a solid wall
+    # between them. Prefer positions directly visible from the current camera.
+    var target := at + Vector3.UP * 0.015
+    var shoulder := player.global_position + Vector3.UP * 1.25
+    for origin in [shoulder, camera.global_position]:
+        var query := PhysicsRayQueryParameters3D.create(origin, target, 1, [body.get_rid(), player.get_rid()])
+        if not get_world_3d().direct_space_state.intersect_ray(query).is_empty():
+            return false
+    return not camera.is_position_behind(target)
+
+func should_migrate_legacy(id: String, record: Dictionary, layout: int) -> bool:
+    if layout >= LAYOUT_VERSION or bool(record.get("moved", false)) or not LEGACY_POSITIONS.has(id):
+        return false
+    var pos: Variant = record.get("position", [])
+    if not pos is Array or pos.size() != 3:
+        return false
+    var old := Vector2(float(pos[0]), float(pos[2]))
+    var initial: Vector3 = LEGACY_POSITIONS[id]
+    var current := Vector2(player.global_position.x, player.global_position.z)
+    return old.distance_to(Vector2(initial.x, initial.z)) < 0.35 and old.distance_to(current) > 4.0
+
+func spawn_items(saved: Dictionary, layout: int = 0) -> void:
     # Run after static collision shapes have entered the physics world.
     await get_tree().physics_frame
     await get_tree().physics_frame
     var occupied: Array[AABB] = []
     var candidates: Array[Vector3] = []
-    # Start near the original player spawn, then search the ground slab.
-    for radius in [2.0, 3.5, 5.0, 7.0, 10.0, 14.0, 20.0]:
+    # Start in front of the current saved character, not the New Game
+    # spawn. The camera's horizontal forward vector defines the preferred area.
+    var center := player.global_position
+    var forward := -camera.global_transform.basis.z
+    forward.y = 0.0
+    forward = forward.normalized()
+    if forward.length_squared() < 0.001:
+        forward = Vector3.FORWARD
+    for distance in [2.0, 2.8, 3.6, 4.8, 6.0, 8.0, 12.0, 16.0]:
+        for degrees in [0, -25, 25, -50, 50, -75, 75, -100, 100, -125, 125, -150, 150, 180]:
+            var point := center + forward.rotated(Vector3.UP, deg_to_rad(float(degrees))) * float(distance)
+            if absf(point.x) < 27.0 and absf(point.z) < 27.0:
+                candidates.append(point)
+    # Ground-level fallback if the current character is on stairs or in a
+    # crowded unit without enough floor area for furniture.
+    for distance in [2.0, 3.5, 5.0, 7.0, 10.0, 14.0, 20.0]:
         for i in range(24):
             var angle := TAU * float(i) / 24.0
-            var point := Vector3(-10.4 + cos(angle) * radius, 0, 5.0 + sin(angle) * radius)
+            var point := Vector3(-10.4 + cos(angle) * float(distance), 0, 5.0 + sin(angle) * float(distance))
             if absf(point.x) < 27.0 and absf(point.z) < 27.0:
                 candidates.append(point)
     for definition in DEFINITIONS:
@@ -188,7 +243,8 @@ func spawn_items(saved: Dictionary) -> void:
         var dimensions: Vector3 = body.get_meta("dimensions")
         var placed := false
         var record: Variant = saved.get(str(definition["id"]), {})
-        if record is Dictionary:
+        if record is Dictionary and not should_migrate_legacy(str(definition["id"]), record, layout):
+            body.set_meta("moved", bool(record.get("moved", false)))
             var pos: Variant = record.get("position", [])
             var rot: Variant = record.get("rotation", [])
             if pos is Array and rot is Array and pos.size() == 3 and rot.size() == 3:
@@ -207,23 +263,31 @@ func spawn_items(saved: Dictionary) -> void:
                         occupied.append(restored_bounds)
                         placed = true
         if not placed:
-            for point in candidates:
-                var y := ground_at(point, body, dimensions)
-                if not is_finite(y):
-                    continue
-                var at := Vector3(point.x, y + dimensions.y * 0.5 + 0.025, point.z)
-                var bounds := AABB(at - dimensions * 0.5, dimensions)
-                var overlap := false
-                for prior in occupied:
-                    if bounds.grow(0.22).intersects(prior):
-                        overlap = true
-                        break
-                if overlap or not clear_at(body, at):
-                    continue
-                body.position = at
-                occupied.append(bounds)
-                placed = true
-                break
+            # First pass: visible, nearby and unobstructed. Second pass:
+            # allow a clear but out-of-view location rather than intersecting
+            # existing facility geometry when the player is in a tight space.
+            for require_visible in [true, false]:
+                for point in candidates:
+                    var y := ground_at(point, body, dimensions)
+                    if not is_finite(y):
+                        continue
+                    var at := Vector3(point.x, y + dimensions.y * 0.5 + 0.025, point.z)
+                    if require_visible and not visible_floor_position(body, at):
+                        continue
+                    var bounds := AABB(at - dimensions * 0.5, dimensions)
+                    var overlap := false
+                    for prior in occupied:
+                        if bounds.grow(0.22).intersects(prior):
+                            overlap = true
+                            break
+                    if overlap or not clear_at(body, at):
+                        continue
+                    body.position = at
+                    occupied.append(bounds)
+                    placed = true
+                    break
+                if placed:
+                    break
         if not placed:
             push_error("No clear floor location for " + str(definition["id"]))
             body.queue_free()
@@ -232,7 +296,8 @@ func spawn_items(saved: Dictionary) -> void:
         # Sync this body's new collision before searching for the next item.
         await get_tree().physics_frame
         body.freeze = false
-        print("HOUSEHOLD_PROP ", body.name, " ", body.position)
+        print("HOUSEHOLD_PROP ", body.name, " ", body.position, " player_distance=", body.global_position.distance_to(player.global_position))
+    placement_complete = true
 
 func ray_origin() -> Vector3:
     return camera.project_ray_origin(camera.get_viewport().get_visible_rect().size * 0.5)
@@ -273,6 +338,8 @@ func grab(body: RigidBody3D) -> void:
     if not items.has(body) or is_instance_valid(held):
         return
     held = body
+    held.set_meta("moved", true)
+    locator_time = 0.0
     set_highlight(selected, false)
     selected = null
     held.freeze = true
@@ -330,6 +397,7 @@ func update_hold(delta: float) -> void:
 
 func tick(delta: float) -> void:
     update_hold(delta)
+    update_locator(delta)
     select_at_crosshair()
     var active := is_instance_valid(held) or is_instance_valid(selected)
     button.visible = active
@@ -338,6 +406,31 @@ func tick(delta: float) -> void:
         dot.active = active
         dot.queue_redraw()
 
+func update_locator(delta: float) -> void:
+    if not placement_complete or locator_time <= 0.0:
+        locator.hide()
+        return
+    locator_time = maxf(0.0, locator_time - delta)
+    var lines := PackedStringArray()
+    var forward := -camera.global_transform.basis.z
+    forward.y = 0.0
+    forward = forward.normalized()
+    var right := camera.global_transform.basis.x
+    right.y = 0.0
+    right = right.normalized()
+    for body in items:
+        if not is_instance_valid(body):
+            continue
+        var offset := body.global_position - player.global_position
+        offset.y = 0.0
+        var direction := "ahead" if offset.dot(forward) >= 0.0 else "behind"
+        if absf(offset.dot(right)) > absf(offset.dot(forward)):
+            direction = "right" if offset.dot(right) >= 0.0 else "left"
+        var label := str(body.get_meta("prop_id")).get_slice("_", 0).capitalize()
+        lines.append("%s: %.1f m %s" % [label, offset.length(), direction])
+    locator.text = "\n".join(lines)
+    locator.show()
+
 func snapshot() -> Dictionary:
     var result := {}
     for body in items:
@@ -345,5 +438,5 @@ func snapshot() -> Dictionary:
             continue
         var pos := body.position
         var rot := body.rotation
-        result[str(body.get_meta("prop_id"))] = {"position": [pos.x, pos.y, pos.z], "rotation": [rot.x, rot.y, rot.z]}
+        result[str(body.get_meta("prop_id"))] = {"position": [pos.x, pos.y, pos.z], "rotation": [rot.x, rot.y, rot.z], "moved": bool(body.get_meta("moved", false))}
     return result

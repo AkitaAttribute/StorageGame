@@ -247,7 +247,7 @@ func start_game(data: Dictionary) -> void:
     household.name = "HouseholdProps"
     world.add_child(household)
     household.setup(player, camera, hud, mobile)
-    household.spawn_items(state.get("props", {}))
+    household.spawn_items(state.get("props", {}), int(state.get("prop_layout", 0)))
     if not mobile and DisplayServer.get_name() != "headless":
         Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
     save_game()
@@ -684,8 +684,9 @@ func save_game() -> bool:
     state["rotation"] = visual.rotation.y
     state["camera_yaw"] = camera_yaw
     state["camera_pitch"] = camera_pitch
-    if is_instance_valid(household) and household.items.size() == HouseholdProps.DEFINITIONS.size():
+    if is_instance_valid(household) and household.placement_complete and household.items.size() == HouseholdProps.DEFINITIONS.size():
         state["props"] = household.snapshot()
+        state["prop_layout"] = HouseholdProps.LAYOUT_VERSION
     if not Saves.write_slot(state):
         push_warning("Unable to write save slot.")
         return false
