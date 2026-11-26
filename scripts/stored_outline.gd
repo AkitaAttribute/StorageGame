@@ -98,7 +98,12 @@ func sync(contained: Array[RigidBody3D]) -> void:
     var active := not meshes.is_empty()
     output.visible = active
     mask_view.render_target_update_mode = SubViewport.UPDATE_ALWAYS if active else SubViewport.UPDATE_DISABLED
-    if not active:
+    sync_camera()
+
+# Only the rendering camera needs to follow the player's view continuously.
+# The set of rendered cargo meshes changes exclusively on storage events.
+func sync_camera() -> void:
+    if meshes.is_empty():
         return
     var resolution := Vector2i(source_camera.get_viewport().get_visible_rect().size)
     if resolution.x > 0 and resolution.y > 0 and mask_view.size != resolution:

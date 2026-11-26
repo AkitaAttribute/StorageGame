@@ -162,7 +162,10 @@ func restore(data: Dictionary) -> void:
     for panel in panels:
         var value: Variant = data.get(panel.panel_id, 0.0)
         if (value is float or value is int) and is_finite(float(value)):
-            panel.set_saved_angle(float(value))
+            # Restore the actual saved hinge angle before loading cargo.
+            panel.goal = clampf(float(value), 0.0, HingeController.OPEN_ANGLE)
+            panel.busy = false
+            panel.apply_angle(panel.goal)
 
 func reset() -> void:
     for panel in panels:

@@ -9,8 +9,8 @@ const BODY_MASK := 11
 var body: RigidBody3D
 var compartments: Dictionary = {}
 var locked: Dictionary = {}
-# Track the fully closed transition independently of cabinet velocity.
-var closed_state: Dictionary = {}
+signal contents_changed
+var inventory: Node
 const CONTACT_TOLERANCE := 0.015
 
 func configure(owner_body: RigidBody3D) -> void:
@@ -19,13 +19,22 @@ func configure(owner_body: RigidBody3D) -> void:
 
 func register_compartment(id: String, volume: AABB, closure: HingeController) -> void:
     compartments[id] = {"volume": volume, "closure": closure}
-    closed_state[id] = false
+    closure.fully_closed.connect(_capture.bind(id))
+    closure.accessible.connect(_release_slot.bind(id))
+
+func bind_inventory(owner: Node) -> void:
+    inventory = owner
+
+func reconcile_initial_contents() -> void:
+    for id in compartments:
+        if is_closed(str(id)):
+            _capture(str(id))
 
 func is_closed(id: String) -> bool:
     if not compartments.has(id):
         return false
     var closure: HingeController = compartments[id]["closure"]
-    return closure.angle <= CLOSED_EPSILON and not closure.busy
+    return is_zero_approx(closure.angle)
 
 func is_open(id: String) -> bool:
     if not compartments.has(id):
@@ -54,16 +63,16 @@ func slot_for(item: RigidBody3D) -> String:
             return str(id)
     return ""
 
-func lock_item(item: RigidBody3D, id: String, local_pose: Transform3D) -> bool:
+func lock_item(item: RigidBody3D, id: String, local_pose: Transform3D, restoring: bool = false) -> bool:
     if item == body or item.has_meta("storage_owner") or item.get_meta("object_type", "") == "container":
         return false
     var dimensions: Vector3 = item.get_meta("dimensions", Vector3.ZERO)
-    if not is_closed(id) or not fits(id, local_pose, dimensions):
+    if (not is_closed(id) and (not restoring or is_open(id))) or not fits(id, local_pose, dimensions):
         return false
     # Live contents have already been separated by the physics solver.
     # Overlapping axis-aligned bounds are not evidence of mesh intersection
     # (e.g. two angled tools), and must not prevent securing either item.
-    locked[item] = {"slot": id, "local": local_pose}
+    locked[item] = {"slot": id, "local": local_pose, "parent": item.get_parent(), "process_mode": item.process_mode}
     item.set_meta("storage_owner", self)
     item.set_meta("moved", true)
     # No active contact solver for cargo in a closed compartment: otherwise
@@ -74,18 +83,31 @@ func lock_item(item: RigidBody3D, id: String, local_pose: Transform3D) -> bool:
     item.gravity_scale = 0.0
     item.linear_velocity = Vector3.ZERO
     item.angular_velocity = Vector3.ZERO
-    item.global_transform = body.global_transform * local_pose
+    # Remove the independent physics body from the space, then attach its
+    # entire scene (including original meshes) to the cabinet. The scene
+    # graph now supplies its world transform without a synchronization loop.
+    item.disable_mode = CollisionObject3D.DISABLE_MODE_REMOVE
+    item.process_mode = Node.PROCESS_MODE_DISABLED
+    item.reparent(self, false)
+    item.transform = local_pose
+    contents_changed.emit()
     return true
 
 func release_item(item: RigidBody3D) -> void:
     if not locked.has(item):
         return
-    var relative: Transform3D = locked[item]["local"]
+    var entry: Dictionary = locked[item]
     locked.erase(item)
     if not is_instance_valid(item):
+        contents_changed.emit()
         return
+    var relative: Transform3D = entry["local"]
+    var original_parent: Node = entry["parent"]
+    var world_pose := body.global_transform * relative
+    item.reparent(original_parent, false)
+    item.global_transform = world_pose
     item.remove_meta("storage_owner")
-    item.global_transform = body.global_transform * relative
+    item.process_mode = int(entry["process_mode"])
     item.collision_layer = PROP_LAYER
     item.collision_mask = BODY_MASK
     item.gravity_scale = 1.0
@@ -94,36 +116,23 @@ func release_item(item: RigidBody3D) -> void:
     # Inherit both translation and the tangential velocity of cabinet rotation.
     item.linear_velocity = body.linear_velocity + body.angular_velocity.cross(item.global_position - body.global_position)
     item.angular_velocity = body.angular_velocity
+    contents_changed.emit()
 
-func sync_items() -> void:
-    for item in locked.keys():
-        if not is_instance_valid(item):
-            locked.erase(item)
+# These methods run only on hinge signals, never during normal movement.
+func _capture(id: String) -> void:
+    if not is_instance_valid(inventory) or not inventory.placement_complete or bool(body.get_meta("recovering", false)):
+        return
+    for item in inventory.items:
+        if not is_instance_valid(item) or item == body or item == inventory.held or item.has_meta("storage_owner") or bool(item.get_meta("recovering", false)):
             continue
-        var relative: Transform3D = locked[item]["local"]
-        item.global_transform = body.global_transform * relative
+        var relative: Transform3D = body.global_transform.affine_inverse() * item.global_transform
+        if fits(id, relative, item.get_meta("dimensions", Vector3.ZERO)):
+            lock_item(item, id, relative)
 
-func tick(items: Array[RigidBody3D], held: RigidBody3D) -> void:
-    sync_items()
+func _release_slot(id: String) -> void:
     for item in locked.keys():
-        if is_open(str(locked[item]["slot"])):
+        if str(locked[item]["slot"]) == id:
             release_item(item)
-    # Capture precisely on the first physics tick at full closure (or
-    # initial saved-world reconciliation). Never wait for the cabinet to
-    # move, and never repeatedly adopt an object through a closed door.
-    for id in compartments:
-        var slot := str(id)
-        var closed_now := is_closed(slot)
-        var just_closed := closed_now and not bool(closed_state.get(slot, false))
-        closed_state[slot] = closed_now
-        if not just_closed:
-            continue
-        for item in items:
-            if not is_instance_valid(item) or item == body or item == held or item.has_meta("storage_owner") or bool(item.get_meta("recovering", false)):
-                continue
-            var relative := body.global_transform.affine_inverse() * item.global_transform
-            if fits(slot, relative, item.get_meta("dimensions", Vector3.ZERO)):
-                lock_item(item, slot, relative)
 
 func serialize_item(item: RigidBody3D) -> Dictionary:
     if not locked.has(item):
@@ -142,5 +151,5 @@ func restore_item(item: RigidBody3D, record: Dictionary) -> bool:
     var local_rotation := Vector3(float(rot[0]), float(rot[1]), float(rot[2]))
     if not local_position.is_finite() or not local_rotation.is_finite():
         return false
-    return lock_item(item, str(record.get("slot", "")), Transform3D(Basis.from_euler(local_rotation), local_position))
+    return lock_item(item, str(record.get("slot", "")), Transform3D(Basis.from_euler(local_rotation), local_position), true)
 

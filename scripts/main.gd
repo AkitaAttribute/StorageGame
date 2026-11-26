@@ -862,12 +862,10 @@ func _smoke() -> void:
     # Place cargo with the door open and the cabinet stationary. Include
     # a realistic 6 mm floor contact offset (the old inset rejected it).
     fridge.panels[0].apply_angle(1.7)
-    fridge.storage.tick(household.items, null)
     var cargo_local := Transform3D(Basis.IDENTITY, Vector3(0, lower_volume.position.y + cargo_dimensions.y * 0.5 - 0.006, lower_volume.get_center().z))
     cargo.freeze = true
     cargo.global_transform = test_prop.global_transform * cargo_local
     await get_tree().physics_frame
-    fridge.storage.tick(household.items, null)
     if cargo.has_meta("storage_owner"):
         push_error("Open compartment secured cargo prematurely")
         get_tree().quit(1)
@@ -876,8 +874,7 @@ func _smoke() -> void:
     fridge.panels[0].toggle()
     for i in range(65):
         fridge.step(1.0 / 60.0)
-        fridge.storage.tick(household.items, null)
-        if fridge.panels[0].angle > 0.005 and cargo.has_meta("storage_owner"):
+            if fridge.panels[0].angle > 0.005 and cargo.has_meta("storage_owner"):
             push_error("Cargo secured before door fully closed")
             get_tree().quit(1)
             return
@@ -887,12 +884,10 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     test_prop.global_transform = Transform3D(Basis(Vector3.UP, 0.65), Vector3(1, 23, 0))
-    fridge.storage.sync_items()
-    if not cargo.global_transform.is_equal_approx(test_prop.global_transform * cargo_local):
+    if cargo.get_parent() != fridge.storage or cargo.process_mode != Node.PROCESS_MODE_DISABLED or not cargo.global_transform.is_equal_approx(test_prop.global_transform * cargo_local):
         push_error("Stored item did not follow container transform")
         get_tree().quit(1)
         return
-    household.refresh_stored_outline()
     if not household.stored_outline.meshes.has(cargo) or household.stored_outline.meshes.has(test_prop):
         push_error("Outline must highlight stored cargo, not the container")
         get_tree().quit(1)
@@ -903,20 +898,17 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     fridge.panels[1].apply_angle(1.7)
-    fridge.storage.tick(household.items, null)
     if not cargo.has_meta("storage_owner"):
         push_error("Opening freezer released refrigerator contents")
         get_tree().quit(1)
         return
     fridge.panels[0].apply_angle(1.7)
-    fridge.storage.tick(household.items, null)
-    if cargo.has_meta("storage_owner") or cargo.freeze or not is_equal_approx(cargo.gravity_scale, 1.0):
+    if cargo.has_meta("storage_owner") or cargo.get_parent() != household or cargo.process_mode == Node.PROCESS_MODE_DISABLED or cargo.freeze or not is_equal_approx(cargo.gravity_scale, 1.0):
         push_error("Opening refrigerator did not release cargo physics")
         get_tree().quit(1)
         return
     cargo.freeze = true
     cargo.global_transform = cargo_original
-    household.refresh_stored_outline()
     if household.stored_outline.meshes.has(cargo):
         push_error("Removed cargo retained its stored-item outline")
         get_tree().quit(1)

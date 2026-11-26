@@ -388,6 +388,13 @@ func spawn_items(saved: Dictionary, layout: int = 0) -> void:
                 fridge.restore(saved_doors)
         print("HOUSEHOLD_PROP ", body.name, " ", body.position, " dimensions=", dimensions, " player_distance=", body.global_position.distance_to(player.global_position))
     placement_complete = true
+    for item in items:
+        var storage := item.get_node_or_null("StorageContents") as StorageContents
+        if storage != null:
+            storage.bind_inventory(self)
+            storage.contents_changed.connect(refresh_stored_outline)
+            storage.reconcile_initial_contents()
+    refresh_stored_outline()
 
 func ray_origin() -> Vector3:
     return camera.project_ray_origin(camera.get_viewport().get_visible_rect().size * 0.5)
@@ -585,16 +592,8 @@ func tick(delta: float) -> void:
             var fridge := item.get_node_or_null("InteractiveFridge") as Fridge
             if fridge != null:
                 fridge.step(delta)
-    for item in items:
-        if not is_instance_valid(item) or bool(item.get_meta("recovering", false)):
-            continue
-        var storage := item.get_node_or_null("StorageContents") as StorageContents
-        if storage != null and placement_complete:
-            # Door animation was advanced above, so a newly shut door
-            # secures cargo in this very physics frame, before any pull.
-            storage.tick(items, held)
     update_hold(delta)
-    refresh_stored_outline()
+    stored_outline.sync_camera()
     select_at_crosshair()
     var active := is_instance_valid(held) or is_instance_valid(selected)
     button.visible = active
@@ -603,22 +602,12 @@ func tick(delta: float) -> void:
         dot.active = active
         dot.queue_redraw()
 
+# Membership changes are signaled by the container, not discovered every frame.
 func refresh_stored_outline() -> void:
     var contained: Array[RigidBody3D] = []
     for item in items:
-        if not is_instance_valid(item) or item.get_meta("object_type", "") == "container" or bool(item.get_meta("recovering", false)):
-            continue
-        if item.has_meta("storage_owner"):
+        if is_instance_valid(item) and item.has_meta("storage_owner"):
             contained.append(item)
-            continue
-        # Show items that are fully inside even before closing the door.
-        for owner in items:
-            if not is_instance_valid(owner) or owner == item:
-                continue
-            var storage := owner.get_node_or_null("StorageContents") as StorageContents
-            if storage != null and not storage.slot_for(item).is_empty():
-                contained.append(item)
-                break
     stored_outline.sync(contained)
 
 func snapshot() -> Dictionary:
@@ -626,9 +615,11 @@ func snapshot() -> Dictionary:
     for body in items:
         if not is_instance_valid(body):
             continue
-        var pos := body.position
-        var rot := body.rotation
-        if needs_recovery(body) or bool(body.get_meta("recovering", false)) or not body.visible:
+        # Stored bodies are parented to their cabinet; persist world-space
+        # fallback coordinates plus the canonical relative cargo record.
+        var pos := body.global_position
+        var rot := body.global_rotation
+        if not body.has_meta("storage_owner") and (needs_recovery(body) or bool(body.get_meta("recovering", false)) or not body.visible):
             pos = body.get_meta("safe_position", Vector3.ZERO)
             rot = body.get_meta("safe_rotation", Vector3.ZERO)
         if not valid_world_position(pos) or not rot.is_finite():

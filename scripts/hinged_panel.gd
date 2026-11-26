@@ -1,6 +1,9 @@
 extends Node3D
 ## Reusable hinged panel attached to a single compound rigid body.
 ## Separate ray-pickable shape, visual pivot, and obstruction-checked motion.
+signal fully_closed
+signal accessible
+const ACCESS_ANGLE := deg_to_rad(70.0)
 const OPEN_ANGLE := deg_to_rad(105.0)
 const ANGULAR_SPEED := deg_to_rad(120.0)
 var body: RigidBody3D
@@ -30,11 +33,16 @@ func configure(owner_body: RigidBody3D, id: String, label: String, hinge: Vector
     apply_angle(0.0)
 
 func apply_angle(value: float) -> void:
+    var previous := angle
     angle = clampf(value, 0.0, OPEN_ANGLE)
     rotation.y = angle * hinge_sign
     # Shape belongs to the same rigid body as the cabinet, not a second body.
     # Convert its pivot-relative transform to body coordinates.
     panel_shape.transform = body.global_transform.affine_inverse() * global_transform * Transform3D(Basis.IDENTITY, local_box)
+    if previous > 0.0 and is_zero_approx(angle):
+        fully_closed.emit()
+    if previous < ACCESS_ANGLE and angle >= ACCESS_ANGLE:
+        accessible.emit()
 
 func action_text() -> String:
     return ("Close " if angle > deg_to_rad(2.0) else "Open ") + display_name
