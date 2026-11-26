@@ -1,6 +1,7 @@
 extends Node3D
 ## Physics props, crosshair selection and gravity-free camera-directed grabbing.
 const Fridge = preload("res://scripts/interactive_fridge.gd")
+const StorageContents = preload("res://scripts/storage_contents.gd")
 const HingedPanel = preload("res://scripts/hinged_panel.gd")
 const REACH := 2.1 # Three approximately 70 cm arm lengths.
 const PROP_LAYER := 2
@@ -42,8 +43,6 @@ var dot: Crosshair
 var button: Button
 var mobile := false
 var desired_position := Vector3.ZERO
-var locator: Label
-var locator_time := 60.0
 var placement_complete := false
 
 class Crosshair:
@@ -84,14 +83,6 @@ func setup(body: CharacterBody3D, view: Camera3D, hud: Control, on_mobile: bool)
         button.pressed.connect(toggle_grab)
     button.hide()
     hud.add_child(button)
-    locator = Label.new()
-    locator.mouse_filter = Control.MOUSE_FILTER_IGNORE
-    locator.position = Vector2(22, 18)
-    locator.add_theme_font_size_override("font_size", 17)
-    locator.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.95))
-    locator.add_theme_constant_override("shadow_offset_x", 2)
-    locator.add_theme_constant_override("shadow_offset_y", 2)
-    hud.add_child(locator)
 
 func mesh_bounds(root: Node3D) -> AABB:
     var bounds := AABB()
@@ -302,6 +293,24 @@ func find_floor_position(body: RigidBody3D, candidates: Array[Vector3], occupied
                 return at
     return Vector3.INF
 
+func container_by_id(id: String) -> StorageContents:
+    for item in items:
+        if is_instance_valid(item) and str(item.get_meta("prop_id", "")) == id:
+            return item.get_node_or_null("StorageContents") as StorageContents
+    return null
+
+func inside_open_container(body: RigidBody3D, pose: Transform3D) -> bool:
+    for item in items:
+        var storage := item.get_node_or_null("StorageContents") as StorageContents
+        if storage == null:
+            continue
+        var relative := item.global_transform.affine_inverse() * pose
+        for id in storage.compartments:
+            var closure: HingedPanel = storage.compartments[id]["closure"]
+            if closure.goal >= StorageContents.OPEN_CLEARANCE and storage.fits(str(id), relative, body.get_meta("dimensions")):
+                return true
+    return false
+
 func spawn_items(saved: Dictionary, layout: int = 0) -> void:
     # Run after static collision shapes have entered the physics world.
     await get_tree().physics_frame
@@ -316,6 +325,14 @@ func spawn_items(saved: Dictionary, layout: int = 0) -> void:
         var dimensions: Vector3 = body.get_meta("dimensions")
         var placed := false
         var record: Variant = saved.get(str(definition["id"]), {})
+        # Containers are constructed first. A valid stored item can be
+        # restored inside its container without normal floor placement.
+        if record is Dictionary and record.get("storage", {}) is Dictionary:
+            var cargo: Dictionary = record.get("storage", {})
+            var storage := container_by_id(str(cargo.get("owner", "")))
+            if storage != null and storage.restore_item(body, cargo):
+                items.append(body)
+                continue
         if record is Dictionary and not should_migrate_legacy(str(definition["id"]), record, layout):
             body.set_meta("moved", bool(record.get("moved", false)))
             var pos: Variant = record.get("position", [])
@@ -330,7 +347,8 @@ func spawn_items(saved: Dictionary, layout: int = 0) -> void:
                         if restored_bounds.grow(0.02).intersects(prior):
                             overlap = true
                             break
-                    if not overlap and clear_at(body, at, Basis.from_euler(angles)):
+                    var restored_pose := Transform3D(Basis.from_euler(angles), at)
+                    if (not overlap or inside_open_container(body, restored_pose)) and clear_at(body, at, restored_pose.basis):
                         body.position = at
                         body.rotation = angles
                         occupied.append(restored_bounds)
@@ -377,7 +395,8 @@ func set_highlight(body: RigidBody3D, enabled: bool) -> void:
         return
     for node in body.find_children("*", "MeshInstance3D", true, false):
         var mesh := node as MeshInstance3D
-        mesh.material_overlay = glow if enabled else null
+        if not mesh.has_meta("container_outline"):
+            mesh.material_overlay = glow if enabled else null
 
 func select_at_crosshair() -> void:
     var next: RigidBody3D = null
@@ -428,7 +447,7 @@ func toggle_grab() -> void:
         grab(selected)
 
 func grab(body: RigidBody3D) -> void:
-    if not items.has(body) or is_instance_valid(held) or bool(body.get_meta("recovering", false)):
+    if not items.has(body) or is_instance_valid(held) or bool(body.get_meta("recovering", false)) or body.has_meta("storage_owner"):
         return
     held = body
     held.set_meta("moved", true)
@@ -527,6 +546,8 @@ func recover_item(body: RigidBody3D) -> void:
     for other in items:
         if other == body or not is_instance_valid(other) or not valid_world_position(other.global_position):
             continue
+        if other.has_meta("storage_owner"):
+            continue
         var dimensions: Vector3 = other.get_meta("dimensions")
         occupied.append(other.global_transform * AABB(-dimensions * 0.5, dimensions))
     var at := find_floor_position(body, floor_candidates(), occupied)
@@ -547,21 +568,25 @@ func recover_item(body: RigidBody3D) -> void:
     body.collision_mask = BODY_MASK
     await get_tree().physics_frame
     body.set_meta("recovering", false)
-    locator_time = maxf(locator_time, 60.0)
     print("HOUSEHOLD_RECOVERED ", body.name, " ", at)
 
 func tick(delta: float) -> void:
     if placement_complete:
         for body in items:
-            if is_instance_valid(body) and not bool(body.get_meta("recovering", false)) and (needs_recovery(body) or not body.visible):
+            if is_instance_valid(body) and not body.has_meta("storage_owner") and not bool(body.get_meta("recovering", false)) and (needs_recovery(body) or not body.visible):
                 recover_item(body)
     for item in items:
         if is_instance_valid(item) and not bool(item.get_meta("recovering", false)) and item != held:
             var fridge := item.get_node_or_null("InteractiveFridge") as Fridge
             if fridge != null:
                 fridge.step(delta)
+    for item in items:
+        if not is_instance_valid(item) or bool(item.get_meta("recovering", false)):
+            continue
+        var storage := item.get_node_or_null("StorageContents") as StorageContents
+        if storage != null:
+            storage.tick(items, held)
     update_hold(delta)
-    update_locator(delta)
     select_at_crosshair()
     var active := is_instance_valid(held) or is_instance_valid(selected)
     button.visible = active
@@ -569,34 +594,6 @@ func tick(delta: float) -> void:
     if dot.active != active:
         dot.active = active
         dot.queue_redraw()
-
-func update_locator(delta: float) -> void:
-    if not placement_complete or locator_time <= 0.0:
-        locator.hide()
-        return
-    locator_time = maxf(0.0, locator_time - delta)
-    var lines := PackedStringArray()
-    var forward := -camera.global_transform.basis.z
-    forward.y = 0.0
-    forward = forward.normalized()
-    var right := camera.global_transform.basis.x
-    right.y = 0.0
-    right = right.normalized()
-    for body in items:
-        if not is_instance_valid(body):
-            continue
-        if bool(body.get_meta("recovering", false)) or not body.visible or needs_recovery(body):
-            lines.append(str(body.get_meta("prop_id")).get_slice("_", 0).capitalize() + ": recovering...")
-            continue
-        var offset := body.global_position - player.global_position
-        offset.y = 0.0
-        var direction := "ahead" if offset.dot(forward) >= 0.0 else "behind"
-        if absf(offset.dot(right)) > absf(offset.dot(forward)):
-            direction = "right" if offset.dot(right) >= 0.0 else "left"
-        var label := str(body.get_meta("prop_id")).get_slice("_", 0).capitalize()
-        lines.append("%s: %.1f m %s" % [label, offset.length(), direction])
-    locator.text = "\n".join(lines)
-    locator.show()
 
 func snapshot() -> Dictionary:
     var result := {}
@@ -614,5 +611,9 @@ func snapshot() -> Dictionary:
         var fridge := body.get_node_or_null("InteractiveFridge") as Fridge
         if fridge != null:
             record["hinges"] = fridge.snapshot()
+        if body.has_meta("storage_owner"):
+            var storage := body.get_meta("storage_owner") as StorageContents
+            if is_instance_valid(storage):
+                record["storage"] = storage.serialize_item(body)
         result[str(body.get_meta("prop_id"))] = record
     return result

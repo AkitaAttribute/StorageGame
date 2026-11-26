@@ -73,4 +73,5 @@ func step(delta: float) -> void:
 
 func highlight(material: Material) -> void:
     for node in find_children("*", "MeshInstance3D", true, false):
-        (node as MeshInstance3D).material_overlay = material
+        if not node.has_meta("container_outline"):
+            (node as MeshInstance3D).material_overlay = material

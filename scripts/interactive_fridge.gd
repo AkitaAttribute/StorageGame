@@ -2,6 +2,8 @@ extends Node3D
 ## Original refrigerator geometry: an open cabinet, two compartments,
 ## independently hinged doors, and a compound collider on the parent body.
 const HingeController = preload("res://scripts/hinged_panel.gd")
+const StorageContents = preload("res://scripts/storage_contents.gd")
+var storage: StorageContents
 var panels: Array[HingeController] = []
 var body: RigidBody3D
 
@@ -107,6 +109,22 @@ func build(owner_body: RigidBody3D, size: Vector3) -> void:
     part(self, "LowerTrim", Vector3(0, bottom + 0.025, front - 0.004), Vector3(w - 0.02, 0.035, 0.012), dark)
     make_door("fridge", "fridge", bottom + 0.050, split - 0.012, w, d, door_depth, steel, liner, dark, handle)
     make_door("freezer", "freezer", split + 0.012, top - 0.008, w, d, door_depth, steel, liner, dark, handle)
+    storage = StorageContents.new()
+    storage.name = "StorageContents"
+    body.add_child(storage)
+    storage.configure(body)
+    var interior_width := w - 2.0 * t - 0.016
+    var interior_depth := cabinet_depth - t - 0.014
+    var interior_back := rear + t + 0.003
+    var lower_floor := bottom + t
+    var lower_ceiling := split - t * 0.5
+    var upper_floor := split + t * 0.5
+    var upper_ceiling := top - t
+    storage.register_compartment("fridge", AABB(Vector3(-interior_width * 0.5, lower_floor, interior_back), Vector3(interior_width, lower_ceiling - lower_floor, interior_depth)), panels[0])
+    storage.register_compartment("freezer", AABB(Vector3(-interior_width * 0.5, upper_floor, interior_back), Vector3(interior_width, upper_ceiling - upper_floor, interior_depth)), panels[1])
+    storage.add_outline(self, Vector3(0, 0, cz), Vector3(w, h, cabinet_depth))
+    for panel in panels:
+        storage.add_outline(panel, panel.local_box, (panel.panel_shape.shape as BoxShape3D).size)
 
 func make_door(id: String, label: String, low: float, high: float, w: float, d: float, depth: float, steel: Material, liner: Material, dark: Material, handle: Material) -> void:
     var hinge := HingeController.new()

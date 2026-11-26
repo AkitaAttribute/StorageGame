@@ -833,6 +833,47 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     fridge.reset()
+    var cargo: RigidBody3D = household.items[2]
+    var cargo_original := cargo.global_transform
+    var lower_volume: AABB = fridge.storage.compartments["fridge"]["volume"]
+    var cargo_dimensions: Vector3 = cargo.get_meta("dimensions")
+    # Put the screwdriver entirely inside the bottom shelf compartment.
+    var cargo_local := Transform3D(Basis.IDENTITY, Vector3(0, lower_volume.position.y + cargo_dimensions.y * 0.5 + 0.02, lower_volume.get_center().z))
+    cargo.global_transform = test_prop.global_transform * cargo_local
+    await get_tree().physics_frame
+    fridge.storage.tick(household.items, null)
+    if not cargo.has_meta("storage_owner") or cargo.collision_layer != 0 or not cargo.freeze:
+        push_error("Closed container did not secure its contents")
+        get_tree().quit(1)
+        return
+    test_prop.global_transform = Transform3D(Basis(Vector3.UP, 0.65), Vector3(1, 23, 0))
+    fridge.storage.sync_items()
+    if not cargo.global_transform.is_equal_approx(test_prop.global_transform * cargo_local):
+        push_error("Stored item did not follow container transform")
+        get_tree().quit(1)
+        return
+    var cargo_record: Dictionary = fridge.storage.serialize_item(cargo)
+    if str(cargo_record.get("slot", "")) != "fridge":
+        push_error("Stored item save record missing compartment")
+        get_tree().quit(1)
+        return
+    fridge.panels[1].apply_angle(1.7)
+    fridge.storage.tick(household.items, null)
+    if not cargo.has_meta("storage_owner"):
+        push_error("Opening freezer released refrigerator contents")
+        get_tree().quit(1)
+        return
+    fridge.panels[0].apply_angle(1.7)
+    fridge.storage.tick(household.items, null)
+    if cargo.has_meta("storage_owner") or cargo.freeze or not is_equal_approx(cargo.gravity_scale, 1.0):
+        push_error("Opening refrigerator did not release cargo physics")
+        get_tree().quit(1)
+        return
+    cargo.freeze = true
+    cargo.global_transform = cargo_original
+    cargo.linear_velocity = Vector3.ZERO
+    cargo.angular_velocity = Vector3.ZERO
+    fridge.reset()
     test_prop.global_transform = saved_fridge_transform
     await get_tree().physics_frame
     await get_tree().physics_frame
