@@ -635,6 +635,15 @@ func _physics_process(delta: float) -> void:
         save_game()
 
 func update_nearby() -> void:
+    if is_instance_valid(household) and household.has_panel_action():
+        nearby = -2
+        var text := household.panel_action_text()
+        if mobile:
+            use_button.visible = true
+            use_button.text = text
+        else:
+            prompt.text = "E  " + text
+        return
     nearby = -1
     var best := REACH
     for i in range(doors.size()):
@@ -653,6 +662,9 @@ func update_nearby() -> void:
         prompt.text = "" if nearby < 0 else ("E  Close" if doors[nearby]["open"] else "E  Open")
 
 func use_nearby() -> void:
+    if nearby == -2 and is_instance_valid(household):
+        household.use_panel()
+        return
     if nearby < 0 or nearby >= doors.size():
         return
     var door: Dictionary = doors[nearby]
@@ -762,6 +774,57 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     var test_prop: RigidBody3D = household.items[0]
+    var fridge := test_prop.get_node_or_null("InteractiveFridge") as Node3D
+    if fridge == null or fridge.panels.size() != 2:
+        push_error("Refrigerator hinges missing")
+        get_tree().quit(1)
+        return
+    # Isolate the fridge to exercise actual ray picking and both hinge
+    # colliders without relying on a particular facility layout.
+    set_physics_process(false)
+    var saved_fridge_transform := test_prop.global_transform
+    test_prop.global_transform = Transform3D(Basis.IDENTITY, Vector3(0, 23, 0))
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    for panel in fridge.panels:
+        var origin: Vector3 = test_prop.to_global(panel.position + Vector3(-0.25, 0, 1.0))
+        var finish: Vector3 = origin - Vector3(0, 0, 2.0)
+        var ray := PhysicsRayQueryParameters3D.create(origin, finish, HouseholdProps.PROP_LAYER)
+        var hit := world.get_world_3d().direct_space_state.intersect_ray(ray)
+        if hit.is_empty() or household.panel_from_hit(test_prop, hit) != panel:
+            push_error("Independent refrigerator door ray selection failed")
+            get_tree().quit(1)
+            return
+    fridge.panels[0].toggle()
+    for i in range(65):
+        fridge.step(1.0 / 60.0)
+        await get_tree().physics_frame
+    if fridge.panels[0].angle < 1.6 or not is_zero_approx(fridge.panels[1].angle):
+        push_error("Fridge door did not open independently")
+        get_tree().quit(1)
+        return
+    fridge.panels[1].toggle()
+    for i in range(65):
+        fridge.step(1.0 / 60.0)
+        await get_tree().physics_frame
+    fridge.panels[0].toggle()
+    for i in range(65):
+        fridge.step(1.0 / 60.0)
+        await get_tree().physics_frame
+    if not is_zero_approx(fridge.panels[0].angle) or fridge.panels[1].angle < 1.6:
+        push_error("Fridge door close affected the freezer")
+        get_tree().quit(1)
+        return
+    var hinge_state: Dictionary = fridge.snapshot()
+    if float(hinge_state.get("freezer", 0.0)) < 1.6:
+        push_error("Refrigerator hinge state not captured")
+        get_tree().quit(1)
+        return
+    fridge.reset()
+    test_prop.global_transform = saved_fridge_transform
+    await get_tree().physics_frame
+    await get_tree().physics_frame
+    set_physics_process(true)
     household.grab(test_prop)
     if test_prop.freeze or not is_zero_approx(test_prop.gravity_scale):
         push_error("Grab did not disable gravity")

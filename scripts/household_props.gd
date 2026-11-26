@@ -1,5 +1,7 @@
 extends Node3D
 ## Physics props, crosshair selection and gravity-free camera-directed grabbing.
+const Fridge = preload("res://scripts/interactive_fridge.gd")
+const HingedPanel = preload("res://scripts/hinged_panel.gd")
 const REACH := 2.1 # Three approximately 70 cm arm lengths.
 const PROP_LAYER := 2
 const WORLD_MASK := 3
@@ -29,6 +31,7 @@ var player: CharacterBody3D
 var camera: Camera3D
 var items: Array[RigidBody3D] = []
 var selected: RigidBody3D
+var selected_panel: HingedPanel
 var held: RigidBody3D
 var hold_distance := 4.0
 var previous_linear_damp := 0.1
@@ -178,12 +181,22 @@ func build_item(definition: Dictionary) -> RigidBody3D:
     # into the ground; their original visual proportions remain unchanged.
     var minimum := Vector3(0.025, 0.05, 0.025) if definition.has("length") else Vector3(0.025, 0.025, 0.025)
     var dimensions := (bounds.size * scale_factor).max(minimum)
-    var shape := BoxShape3D.new()
-    shape.size = dimensions
-    var collision := CollisionShape3D.new()
-    collision.shape = shape
-    collision.name = "PropCollision"
-    body.add_child(collision)
+    if str(definition["id"]) == "fridge_00":
+        # Use the original asset's measured dimensions but replace its
+        # material-merged mesh with a hollow, articulated cabinet.
+        art.hide()
+        art.queue_free()
+        var fridge := Fridge.new()
+        fridge.name = "InteractiveFridge"
+        body.add_child(fridge)
+        fridge.build(body, dimensions)
+    else:
+        var shape := BoxShape3D.new()
+        shape.size = dimensions
+        var collision := CollisionShape3D.new()
+        collision.shape = shape
+        collision.name = "PropCollision"
+        body.add_child(collision)
     if not dimensions.is_finite() or dimensions.x > 4.0 or dimensions.y > 3.0 or dimensions.z > 4.0:
         push_error("Invalid normalized household prop dimensions: " + str(dimensions))
         body.queue_free()
@@ -345,6 +358,11 @@ func spawn_items(saved: Dictionary, layout: int = 0) -> void:
         body.collision_mask = BODY_MASK
         await get_tree().physics_frame
         items.append(body)
+        var fridge := body.get_node_or_null("InteractiveFridge") as Fridge
+        if fridge != null and record is Dictionary:
+            var saved_doors: Variant = record.get("hinges", {})
+            if saved_doors is Dictionary:
+                fridge.restore(saved_doors)
         print("HOUSEHOLD_PROP ", body.name, " ", body.position, " dimensions=", dimensions, " player_distance=", body.global_position.distance_to(player.global_position))
     placement_complete = true
 
@@ -363,6 +381,7 @@ func set_highlight(body: RigidBody3D, enabled: bool) -> void:
 
 func select_at_crosshair() -> void:
     var next: RigidBody3D = null
+    var next_panel: HingedPanel = null
     if not is_instance_valid(held):
         var origin := ray_origin()
         var query := PhysicsRayQueryParameters3D.create(origin, origin + ray_direction() * 9.0, WORLD_MASK, [player.get_rid()])
@@ -372,10 +391,35 @@ func select_at_crosshair() -> void:
             var shoulder := player.global_position + Vector3.UP * 1.2
             if is_instance_valid(candidate) and items.has(candidate) and shoulder.distance_to(Vector3(hit["position"])) <= REACH:
                 next = candidate
-    if selected != next:
+                next_panel = panel_from_hit(candidate, hit)
+    if selected != next or selected_panel != next_panel:
         set_highlight(selected, false)
         selected = next
-        set_highlight(selected, true)
+        selected_panel = next_panel
+        if is_instance_valid(selected_panel):
+            selected_panel.highlight(glow)
+        else:
+            set_highlight(selected, true)
+
+func panel_from_hit(candidate: RigidBody3D, hit: Dictionary) -> HingedPanel:
+    var shape_index := int(hit.get("shape", -1))
+    if shape_index < 0:
+        return null
+    var owner_id := candidate.shape_find_owner(shape_index)
+    var shape_owner := candidate.shape_owner_get_owner(owner_id) as CollisionShape3D
+    if shape_owner != null and shape_owner.has_meta("hinge_panel"):
+        return shape_owner.get_meta("hinge_panel") as HingedPanel
+    return null
+
+func has_panel_action() -> bool:
+    return is_instance_valid(selected_panel) and not is_instance_valid(held)
+
+func panel_action_text() -> String:
+    return selected_panel.action_text() if has_panel_action() else ""
+
+func use_panel() -> void:
+    if has_panel_action():
+        selected_panel.toggle()
 
 func toggle_grab() -> void:
     if is_instance_valid(held):
@@ -390,6 +434,7 @@ func grab(body: RigidBody3D) -> void:
     held.set_meta("moved", true)
     set_highlight(selected, false)
     selected = null
+    selected_panel = null
     # Remain a dynamic rigid body with normal collision masks, contact solver
     # and CCD. Never move the transform directly during a grab.
     previous_linear_damp = held.linear_damp
@@ -469,11 +514,15 @@ func recover_item(body: RigidBody3D) -> void:
     if body == selected:
         set_highlight(selected, false)
         selected = null
+        selected_panel = null
     body.freeze = true
     body.collision_layer = 0
     body.collision_mask = 0
     body.linear_velocity = Vector3.ZERO
     body.angular_velocity = Vector3.ZERO
+    var fridge := body.get_node_or_null("InteractiveFridge") as Fridge
+    if fridge != null:
+        fridge.reset()
     var occupied: Array[AABB] = []
     for other in items:
         if other == body or not is_instance_valid(other) or not valid_world_position(other.global_position):
@@ -506,6 +555,11 @@ func tick(delta: float) -> void:
         for body in items:
             if is_instance_valid(body) and not bool(body.get_meta("recovering", false)) and (needs_recovery(body) or not body.visible):
                 recover_item(body)
+    for item in items:
+        if is_instance_valid(item) and not bool(item.get_meta("recovering", false)) and item != held:
+            var fridge := item.get_node_or_null("InteractiveFridge") as Fridge
+            if fridge != null:
+                fridge.step(delta)
     update_hold(delta)
     update_locator(delta)
     select_at_crosshair()
@@ -556,5 +610,9 @@ func snapshot() -> Dictionary:
             rot = body.get_meta("safe_rotation", Vector3.ZERO)
         if not valid_world_position(pos) or not rot.is_finite():
             continue
-        result[str(body.get_meta("prop_id"))] = {"position": [pos.x, pos.y, pos.z], "rotation": [rot.x, rot.y, rot.z], "moved": bool(body.get_meta("moved", false))}
+        var record := {"position": [pos.x, pos.y, pos.z], "rotation": [rot.x, rot.y, rot.z], "moved": bool(body.get_meta("moved", false))}
+        var fridge := body.get_node_or_null("InteractiveFridge") as Fridge
+        if fridge != null:
+            record["hinges"] = fridge.snapshot()
+        result[str(body.get_meta("prop_id"))] = record
     return result
