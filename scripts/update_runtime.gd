@@ -9,6 +9,8 @@ const INSTALLED_METADATA := "user://updates/installed.json"
 const PENDING_PACK := "user://updates/download.pck.part"
 const PENDING_METADATA := "user://updates/installed.json.part"
 const SUCCESS_DELAY := 3.0
+const MAX_DOWNLOAD_RETRIES := 3
+const MAX_MANIFEST_RETRIES := 3
 const PCK_MAGIC := 0x43504447
 
 var _manifest_http: HTTPRequest
@@ -23,6 +25,8 @@ var _pending_url := ""
 var _pending_sha256 := ""
 var _pending_size := 0
 var _installing := false
+var _download_retries := 0
+var _manifest_retries := 0
 
 # The caller obtains the effective build from the already-mounted bootstrap.
 func configure(build: int) -> void:
@@ -79,14 +83,20 @@ func _read_installed_metadata() -> Dictionary:
     return parsed as Dictionary
 
 func _check_for_update() -> void:
-    var err := _manifest_http.request(MANIFEST_URL)
+    var err := _manifest_http.request(MANIFEST_URL + "?check=" + str(Time.get_ticks_msec()) + "-" + str(Time.get_unix_time_from_system()), ["Cache-Control: no-cache", "Pragma: no-cache"])
     if err != OK:
-        push_warning("Storage Game update check failed to start: " + str(err))
+        _show_notice("Update check could not start: " + error_string(err))
 
 func _on_manifest_received(result: int, response_code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
     if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
-        print("Storage Game: update manifest unavailable (", result, "/", response_code, ").")
+        if _manifest_retries < MAX_MANIFEST_RETRIES and (response_code == 404 or response_code >= 500 or response_code == 429 or result != HTTPRequest.RESULT_SUCCESS):
+            _manifest_retries += 1
+            await get_tree().create_timer(2.0 * _manifest_retries).timeout
+            _check_for_update()
+            return
+        _show_notice("Update check failed (%d / HTTP %d). You can continue playing." % [result, response_code])
         return
+    _manifest_retries = 0
     var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
     if typeof(parsed) != TYPE_DICTIONARY:
         push_warning("Storage Game: invalid update manifest.")
@@ -119,6 +129,10 @@ func _on_manifest_received(result: int, response_code: int, _headers: PackedStri
     _download_dialog.popup_centered(Vector2i(520, 230))
 
 func _begin_download() -> void:
+    _download_retries = 0
+    _request_download()
+
+func _request_download() -> void:
     if _installing:
         return
     if _pending_url.is_empty() or _available_build <= _current_build:
@@ -134,7 +148,7 @@ func _begin_download() -> void:
             _show_notice("Unable to remove the previous partial download: " + error_string(remove_error))
             return
     _download_http.download_file = PENDING_PACK
-    var err := _download_http.request(_pending_url)
+    var err := _download_http.request(_pending_url + ("&" if _pending_url.contains("?") else "?") + "attempt=" + str(Time.get_unix_time_from_system()), ["Cache-Control: no-cache", "Pragma: no-cache"])
     if err != OK:
         _show_notice("Could not begin the download (%d)." % err)
         return
@@ -145,7 +159,14 @@ func _begin_download() -> void:
 func _on_pack_received(result: int, response_code: int, _headers: PackedStringArray, _body: PackedByteArray) -> void:
     _notice_dialog.hide()
     if result != HTTPRequest.RESULT_SUCCESS or response_code != 200:
-        _show_notice("Update download failed (%d / HTTP %d)." % [result, response_code])
+        if _download_retries < MAX_DOWNLOAD_RETRIES and (response_code == 404 or response_code >= 500 or response_code == 429 or result != HTTPRequest.RESULT_SUCCESS):
+            _download_retries += 1
+            _notice_dialog.dialog_text = "Download temporarily unavailable (HTTP %d). Retrying %d/%d..." % [response_code, _download_retries, MAX_DOWNLOAD_RETRIES]
+            _notice_dialog.popup_centered(Vector2i(530, 200))
+            await get_tree().create_timer(2.0 * _download_retries).timeout
+            _request_download()
+            return
+        _show_notice("Update download failed (%d / HTTP %d).\n\nStorage Game will remain open. Reopen the game to check for a newer update." % [result, response_code])
         return
     var verification_error := _verify_pending_pack()
     if not verification_error.is_empty():

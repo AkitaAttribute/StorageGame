@@ -264,8 +264,12 @@ jobs:
               ("android", "StorageGame-Android.pck"),
           ]:
               path = build_dir / filename
+              # Never delete/recreate a PCK that an existing manifest references.
+              # Include the run attempt so reruns cannot mutate a published pack.
+              immutable_name = f"StorageGame-{platform.capitalize()}-build-{manifest['build']}-run-{os.environ['GITHUB_RUN_ID']}-attempt-{os.environ['GITHUB_RUN_ATTEMPT']}.pck"
+              path = path.rename(build_dir / immutable_name)
               manifest[platform] = {
-                  "url": f"{base}/{filename}",
+                  "url": f"{base}/{immutable_name}",
                   "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                   "bytes": path.stat().st_size,
               }
@@ -288,11 +292,33 @@ jobs:
               --title "Storage Game Preview Updates" \
               --notes "Automatically refreshed Godot resource packs for the main development branch. Install the current Windows or Android build once to enable in-app patches."
           fi
-          gh release upload "$tag" \
-            build/StorageGame-Windows.pck \
-            build/StorageGame-Android.pck \
-            --repo "$GITHUB_REPOSITORY" --clobber
-          # Upload the manifest last, only once both downloadable packs exist.
+          # Immutable names stay available to every previously published manifest.
+          # Keep the old unversioned PCKs intact for clients with cached manifests.
+          gh release upload "$tag" build/StorageGame-*-build-*-run-*-attempt-*.pck \
+            --repo "$GITHUB_REPOSITORY"
+          # Verify the actual anonymous download URLs, not just the release API.
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import subprocess
+          from pathlib import Path
+
+          manifest = json.loads(Path("build/manifest.json").read_text())
+          for platform in ("windows", "android"):
+              info = manifest[platform]
+              target = Path("/tmp") / f"storage-public-{platform}.pck"
+              subprocess.run([
+                  "curl", "--fail", "--location", "--silent", "--show-error",
+                  "--retry", "8", "--retry-all-errors", "--retry-delay", "5",
+                  "--connect-timeout", "15", "--max-time", "120",
+                  "--output", str(target), info["url"]
+              ], check=True)
+              if target.stat().st_size != info["bytes"] or hashlib.sha256(target.read_bytes()).hexdigest() != info["sha256"]:
+                  raise SystemExit(f"Public {platform} download does not match manifest")
+              print(f"Verified public {platform} pack")
+              target.unlink()
+          PY
+          # Publish the manifest last, once both URLs serve the verified bytes.
           gh release upload "$tag" build/manifest.json \
             --repo "$GITHUB_REPOSITORY" --clobber
           # Publish complete reinstallable builds as a recovery route when a
