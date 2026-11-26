@@ -969,9 +969,11 @@ func _smoke() -> void:
     cargo.linear_velocity = Vector3.ZERO
     cargo.angular_velocity = Vector3.ZERO
     fridge.reset()
-    # Put a fixed small obstacle in the opening swing, without intersecting
-    # the closed cabinet. The door must stay commanded open and push back.
+    # Test a fixed obstruction with a real floor beneath the dynamic
+    # refrigerator. A hinge reaction must move it without cancelling its goal.
     var hinge_probe: Node3D = fridge.panels[0]
+    var fridge_dimensions: Vector3 = test_prop.get_meta("dimensions")
+    var reaction_floor := wall(world, test_prop.global_position - Vector3.UP * (fridge_dimensions.y * 0.5 + 0.11), Vector3(8, 0.2, 8))
     var swing_point: Vector3 = hinge_probe.to_global(Basis(Vector3.UP, 0.45) * hinge_probe.local_box)
     var hinge_wall := wall(world, swing_point + Vector3(0, 0, 0.04), Vector3(0.12, 0.24, 0.12))
     await get_tree().physics_frame
@@ -983,13 +985,42 @@ func _smoke() -> void:
         await get_tree().physics_frame
         if not hinge_probe.busy:
             break
-    if hinge_probe.goal < 1.6 or test_prop.global_position.distance_to(before_push) < 0.005:
-        push_error("Obstructed hinge cancelled or failed to move cabinet")
+    if hinge_probe.goal < 1.6 or test_prop.freeze or test_prop.global_position.distance_to(before_push) < 0.005:
+        push_error("Obstructed hinge cancelled or failed to apply cabinet reaction")
         get_tree().quit(1)
         return
     hinge_wall.queue_free()
+    reaction_floor.queue_free()
+    test_prop.freeze = true
+    test_prop.linear_velocity = Vector3.ZERO
+    test_prop.angular_velocity = Vector3.ZERO
+    fridge.reset()
+    # Face-down regression: the floor must generate an upward reaction
+    # with a torque, rather than the previous horizontal-only displacement.
+    var face_fixture := Vector3(0, 26, 0)
+    var face_floor := wall(world, face_fixture - Vector3.UP * 0.10, Vector3(10, 0.2, 10))
+    test_prop.global_transform = Transform3D(Basis(Vector3.RIGHT, PI * 0.5), face_fixture + Vector3.UP * (fridge_dimensions.z * 0.5 + 0.008))
     await get_tree().physics_frame
     await get_tree().physics_frame
+    var face_start := test_prop.global_transform
+    hinge_probe.toggle()
+    var max_lift := 0.0
+    var max_tilt := 0.0
+    for i in range(240):
+        fridge.step(1.0 / 60.0)
+        await get_tree().physics_frame
+        max_lift = maxf(max_lift, test_prop.global_position.y - face_start.origin.y)
+        max_tilt = maxf(max_tilt, face_start.basis.get_rotation_quaternion().angle_to(test_prop.global_transform.basis.get_rotation_quaternion()))
+        if not hinge_probe.busy:
+            break
+    if hinge_probe.goal < 1.6 or test_prop.freeze or max_lift < 0.008 or max_tilt < 0.015:
+        push_error("Face-down hinge failed to lift and tilt cabinet: lift=%f tilt=%f" % [max_lift, max_tilt])
+        get_tree().quit(1)
+        return
+    face_floor.queue_free()
+    test_prop.freeze = true
+    test_prop.linear_velocity = Vector3.ZERO
+    test_prop.angular_velocity = Vector3.ZERO
     fridge.reset()
     test_prop.global_transform = saved_fridge_transform
     await get_tree().physics_frame

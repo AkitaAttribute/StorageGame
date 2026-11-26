@@ -6,8 +6,14 @@ signal accessible
 const ACCESS_ANGLE := deg_to_rad(70.0)
 const OPEN_ANGLE := deg_to_rad(105.0)
 const ANGULAR_SPEED := deg_to_rad(120.0)
-const PUSH_SPEED := 0.95
+# The motor is velocity limited, not a fixed displacement. A blocked
+# hinge develops slowly increasing force until the obstruction yields.
+const CONTACT_SPEED := 0.18
+const CONTACT_GAIN := 24.0
+const CONTACT_RAMP := 8.0
 const PUSH_MARGIN := 0.001
+# A finite numerical guard, not a gameplay torque setting.
+const MAX_LOAD_ACCELERATION := 120.0
 var body: RigidBody3D
 var panel_id := ""
 var display_name := ""
@@ -17,6 +23,8 @@ var hinge_sign := 1.0
 var panel_shape: CollisionShape3D
 var local_box := Vector3.ZERO
 var busy := false
+var load_acceleration := 0.0
+var blocked_frames := 0
 
 func configure(owner_body: RigidBody3D, id: String, label: String, hinge: Vector3, center: Vector3, dimensions: Vector3, sign_value: float = 1.0) -> void:
     body = owner_body
@@ -54,6 +62,8 @@ func toggle() -> void:
     var opening := goal > 0.01 if busy else angle > deg_to_rad(2.0)
     goal = 0.0 if opening else OPEN_ANGLE
     busy = true
+    load_acceleration = 0.0
+    blocked_frames = 0
 
 func set_saved_angle(value: float) -> void:
     goal = clampf(value, 0.0, OPEN_ANGLE)
@@ -65,7 +75,6 @@ func step(delta: float) -> void:
     var next := move_toward(angle, goal, ANGULAR_SPEED * delta)
     var pivot := body.global_transform.affine_inverse() * global_transform
     pivot.basis = Basis(Vector3.UP, next * hinge_sign)
-    var current_center := panel_shape.global_position
     var proposed := body.global_transform * pivot * Transform3D(Basis.IDENTITY, local_box)
     var query := PhysicsShapeQueryParameters3D.new()
     query.shape = panel_shape.shape
@@ -76,69 +85,69 @@ func step(delta: float) -> void:
     var space := body.get_world_3d().direct_space_state
     var contacts := space.intersect_shape(query, 16)
     if not contacts.is_empty():
-        var sweep := proposed.origin - current_center
-        sweep.y = 0.0
-        var fallback := sweep.normalized()
-        if fallback.length_squared() < 0.0001:
-            fallback = body.global_transform.basis.z.normalized()
-        # A contact normal points from the obstacle toward the door. Move
-        # loose props in the opposite direction; move the cabinet along it
-        # for fixed geometry/player. Never cancel the requested goal.
+        blocked_frames += 1
+        # Work at one actual contact per step. The physics solver handles
+        # gravity, friction, translation and angular response. Never flatten
+        # the normal to the ground plane or directly translate the cabinet.
         var info := space.get_rest_info(query)
-        var normal: Vector3 = info.get("normal", -fallback)
-        normal.y = 0.0
-        normal = normal.normalized() if normal.length_squared() > 0.0001 else -fallback
-        var distance := clampf(sweep.length() + 0.012, 0.003, PUSH_SPEED * delta)
-        var pushed := false
+        if info.is_empty():
+            return
+        var normal: Vector3 = info["normal"]
+        var point: Vector3 = info["point"]
+        var rid: RID = info["rid"]
+        var obstacle: RigidBody3D = null
         for contact in contacts:
-            var obstacle := contact.get("collider") as RigidBody3D
-            if obstacle != null and obstacle.has_meta("prop_id") and not obstacle.has_meta("storage_owner"):
-                # Resolve each item's own contact normal, not another
-                # object's contact from the aggregate query.
-                var other_query := PhysicsShapeQueryParameters3D.new()
-                other_query.shape = query.shape
-                other_query.transform = query.transform
-                other_query.margin = query.margin
-                other_query.collision_mask = query.collision_mask
-                var excluded: Array[RID] = [body.get_rid()]
-                for other in contacts:
-                    if other.get("collider") != obstacle:
-                        var rid: RID = other["rid"]
-                        if not excluded.has(rid):
-                            excluded.append(rid)
-                other_query.exclude = excluded
-                var other_info := space.get_rest_info(other_query)
-                var away: Vector3 = -Vector3(other_info.get("normal", normal))
-                away.y = 0.0
-                if away.length_squared() < 0.0001:
-                    away = fallback
-                if push_body(obstacle, away.normalized() * distance):
-                    pushed = true
-                    obstacle.set_meta("moved", true)
-            else:
-                # Immovable obstruction: the cabinet yields instead.
-                pushed = push_body(body, normal * distance) or pushed
+            if contact["rid"] == rid:
+                obstacle = contact.get("collider") as RigidBody3D
                 break
-        if not pushed:
-            # An item backed against a wall can also force the cabinet back.
-            pushed = push_body(body, normal * distance)
-        if pushed:
-            body.set_meta("moved", true)
-        # Keep the door at its last clear angle and retry next physics
-        # frame after the displaced collider has been synchronized.
+        if normal.length_squared() < 0.0001:
+            return
+        normal = normal.normalized()
+        # Prefer moving an ordinary loose item. If it is backed into a solid,
+        # apply the equal/opposite reaction to the cabinet instead.
+        if obstacle != null and obstacle.has_meta("prop_id") and not obstacle.has_meta("storage_owner"):
+            var away := -normal
+            var blocked := obstacle.test_move(obstacle.global_transform, away * 0.012, null, PUSH_MARGIN)
+            if not blocked or blocked_frames < 12:
+                drive_contact(obstacle, point, away, delta)
+            else:
+                drive_contact(body, point, normal, delta)
+        else:
+            drive_contact(body, point, normal, delta)
+        # Wait for actual physical clearance before advancing the hinge.
+        # The target remains pending even if both bodies are trapped.
         return
+    blocked_frames = 0
+    load_acceleration = 0.0
     apply_angle(next)
     busy = not is_equal_approx(angle, goal)
 
-func push_body(target: RigidBody3D, motion: Vector3) -> bool:
-    if motion.length_squared() < 0.0000001:
-        return false
-    var start := target.global_position
-    # Swept, bounded displacement; never teleport through a floor or wall.
-    # Keep the existing dynamic/frozen state, and do not inject throw speed.
-    target.move_and_collide(motion, false, PUSH_MARGIN)
-    var moved := target.global_position - start
-    return moved.dot(motion.normalized()) > 0.0005
+func drive_contact(target: RigidBody3D, point: Vector3, normal: Vector3, delta: float) -> void:
+    if target.freeze:
+        target.freeze = false
+    target.sleeping = false
+    target.set_meta("moved", true)
+    # Contact-point velocity includes the body's angular movement. The
+    # force is applied off-center at the obstruction, generating a natural
+    # moment about the center of mass and allowing the fridge to lift/tilt.
+    var lever := point - target.global_position
+    var velocity := target.linear_velocity + target.angular_velocity.cross(lever)
+    var normal_speed := velocity.dot(normal)
+    var error := CONTACT_SPEED - normal_speed
+    # A slow integral ramp overcomes static friction or gravity if the
+    # contact remains stalled. Unload immediately as the contact yields.
+    # Keep a high finite ceiling to avoid a numerical explosion if trapped.
+    if error > 0.0:
+        load_acceleration = minf(MAX_LOAD_ACCELERATION, load_acceleration + CONTACT_RAMP * delta)
+    else:
+        load_acceleration = maxf(0.0, load_acceleration - CONTACT_RAMP * 4.0 * delta)
+    var acceleration := maxf(0.0, CONTACT_GAIN * error + load_acceleration)
+    if normal_speed >= CONTACT_SPEED:
+        acceleration = 0.0
+    # Do not apply a displacement or an arbitrary lateral kick. Contact
+    # force is the sole source of reaction movement.
+    if acceleration > 0.0:
+        target.apply_force(normal * target.mass * acceleration, lever)
 
 func highlight(material: Material) -> void:
     for node in find_children("*", "MeshInstance3D", true, false):
