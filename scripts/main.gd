@@ -6,13 +6,16 @@ const UNIT := "res://assets/unit.glb"
 const CHARACTER := "res://assets/locomotion.glb"
 const AVATAR := "res://assets/shino.glb"
 const HumanoidRetarget = preload("res://scripts/humanoid_retarget.gd")
-const SPEED := 1.85
+const SPEED := 3.4
+const ROLLUP_SCENE = preload("res://scenes/rollup_unit.tscn")
+const CHARACTER_HEIGHT := 1.7
 const REACH := 2.0
 const STEP_HEIGHT := 0.44
 const STEP_PRESENTATION_RATE := 1.8
 const STEP_EDGE_REACH := 0.27
 const STEP_MARGIN := 0.002
-const CAMERA_DISTANCE := 7.96
+const CAMERA_DISTANCE := 3.0
+const CAMERA_TARGET_HEIGHT := 1.1
 const CAMERA_SENSITIVITY := 0.004
 var camera_yaw := 0.0
 var camera_pitch := 0.50
@@ -25,6 +28,8 @@ var avatar_base_y := 0.0
 var foot_offset := 0.0
 var movement_joystick: Control
 var stepped_last_frame := false
+var reference_unit_height := 2.4
+var rollup_unit: Node3D
 var state: Dictionary = {}
 var doors: Array[Dictionary] = []
 var world: Node3D
@@ -164,6 +169,7 @@ func start_game(data: Dictionary) -> void:
     # animated, standalone units, with per-door collision and persistent IDs.
     for i in range(4):
         make_unit("unit_%02d" % i, Vector3(-13.0, 0, -4.5 + i * 3.15))
+    make_rollup_unit(facility)
     player = CharacterBody3D.new()
     player.name = "Player"
     player.floor_snap_length = STEP_HEIGHT + 0.04
@@ -189,7 +195,7 @@ func start_game(data: Dictionary) -> void:
     avatar.rotation.y = PI
     var bounds := model_bounds(avatar)
     if bounds.size.y > 0.01:
-        var factor := 1.7 / bounds.size.y
+        var factor := CHARACTER_HEIGHT / bounds.size.y
         avatar.scale = Vector3.ONE * factor
         avatar.position.y = -bounds.position.y * factor
     avatar_base_y = avatar.position.y
@@ -225,7 +231,7 @@ func start_game(data: Dictionary) -> void:
     camera.current = true
     camera_yaw = float(state.get("camera_yaw", 0.0))
     camera_pitch = clampf(float(state.get("camera_pitch", 0.50)), 0.15, 1.22)
-    camera_target = player.position + Vector3.UP
+    camera_target = player.position + Vector3.UP * CAMERA_TARGET_HEIGHT
     update_camera(0.0)
     create_hud()
     if not mobile and DisplayServer.get_name() != "headless":
@@ -272,6 +278,10 @@ func make_unit(id: String, at: Vector3) -> void:
     unit.position = at
     unit.rotation.y = PI / 2.0
     var asset := model(UNIT, unit)
+    if doors.is_empty():
+        var bounds := model_bounds(asset)
+        if bounds.size.y > 1.8:
+            reference_unit_height = bounds.size.y
     var ap := animation_in(asset)
     wall(unit, Vector3(-1.45, 1.2, 0), Vector3(0.12, 2.4, 3.0))
     wall(unit, Vector3(1.45, 1.2, 0), Vector3(0.12, 2.4, 3.0))
@@ -288,6 +298,63 @@ func make_unit(id: String, at: Vector3) -> void:
             ap.seek(ap.get_animation(clip).length, true)
             ap.pause()
     blocker.collision_layer = 0 if opened else 1
+
+# Choose a vacant ground-level footprint using the actual imported mesh
+# triangles, not a guessed interior coordinate or a facility-wide AABB.
+func make_rollup_unit(facility: Node3D) -> void:
+    var obstacles: Array[AABB] = []
+    for child in facility.find_children("*", "MeshInstance3D", true, false):
+        var mesh_node := child as MeshInstance3D
+        if mesh_node.mesh == null:
+            continue
+        var transform := mesh_node.global_transform
+        var faces := mesh_node.mesh.get_faces()
+        for i in range(0, faces.size(), 3):
+            var p0 := transform * faces[i]
+            var p1 := transform * faces[i + 1]
+            var p2 := transform * faces[i + 2]
+            var bounds := AABB(p0, Vector3.ZERO).expand(p1).expand(p2)
+            # Ignore ground-level slabs and geometry wholly above the roof.
+            if bounds.end.y <= 0.08 or bounds.position.y >= reference_unit_height + 0.1:
+                continue
+            obstacles.append(bounds.grow(0.025))
+    for entry in doors:
+        var existing: Node3D = entry["node"]
+        obstacles.append(AABB(existing.position - Vector3(1.6, 0, 1.6), Vector3(3.2, reference_unit_height, 3.2)))
+    var candidates: Array[Vector3] = [Vector3(-13, 0, 8.1), Vector3(-13, 0, -7.8)]
+    # Search outward from the existing row, within the existing playable slab.
+    for z in range(-26, 27, 4):
+        for x in range(-26, 27, 4):
+            candidates.append(Vector3(x, 0, z))
+    var chosen := Vector3.ZERO
+    var found := false
+    for candidate in candidates:
+        # Include a clear approach to the +X-facing entrance.
+        var footprint := AABB(candidate + Vector3(-1.65, 0.08, -1.65), Vector3(5.1, reference_unit_height - 0.08, 3.3))
+        if footprint.has_point(Vector3(-10.4, 0.1, 5)):
+            continue
+        var occupied := false
+        for obstacle in obstacles:
+            if footprint.intersects(obstacle):
+                occupied = true
+                break
+        if not occupied:
+            chosen = candidate
+            found = true
+            break
+    if not found:
+        push_error("No clear floor footprint for roll-up prototype")
+        return
+    var unit := ROLLUP_SCENE.instantiate()
+    unit.name = "rollup_00"
+    world.add_child(unit)
+    unit.position = chosen
+    unit.rotation.y = PI / 2.0
+    var opened := bool(state.get("doors", {}).get("rollup_00", false))
+    unit.build(reference_unit_height, opened)
+    rollup_unit = unit
+    doors.append({"id": "rollup_00", "node": unit, "player": unit.animator, "blocker": unit.blocker, "open": opened, "busy": false})
+    print("ROLLUP_UNIT placement=", chosen, " height=", reference_unit_height)
 
 func create_hud() -> void:
     var layer := CanvasLayer.new()
@@ -395,7 +462,7 @@ func _input(event: InputEvent) -> void:
         get_viewport().set_input_as_handled()
 
 func update_camera(delta: float) -> void:
-    var target := player.position + Vector3.UP + Vector3.UP * visual_step_offset
+    var target := player.position + Vector3.UP * (CAMERA_TARGET_HEIGHT + visual_step_offset)
     if delta <= 0.0:
         camera_target = target
     else:
@@ -591,7 +658,7 @@ func _smoke() -> void:
     var initial := Saves.new_slot()
     start_game(initial)
     await get_tree().process_frame
-    if not is_instance_valid(player) or animator == null or walk == &"" or idle == &"" or doors.size() != 4 or not avatar_ready:
+    if not is_instance_valid(player) or animator == null or walk == &"" or idle == &"" or doors.size() != 5 or not avatar_ready:
         push_error("Player, animations, or units failed to initialize")
         get_tree().quit(1)
         return
@@ -631,6 +698,37 @@ func _smoke() -> void:
         elapsed += get_process_delta_time()
     if not doors[0]["open"] or not Saves.read_slot(str(initial["id"])).get("doors", {}).get("unit_00", false):
         push_error("Door interaction or persistence failed")
+        get_tree().quit(1)
+        return
+    # Exercise the new door through the same interaction and save pipeline.
+    var roll_index := doors.size() - 1
+    nearby = roll_index
+    use_nearby()
+    elapsed = 0.0
+    while doors[roll_index]["busy"] and elapsed < 10.0:
+        await get_tree().process_frame
+        elapsed += get_process_delta_time()
+    if not doors[roll_index]["open"] or not Saves.read_slot(str(initial["id"])).get("doors", {}).get("rollup_00", false):
+        push_error("Roll-up door interaction or persistence failed")
+        get_tree().quit(1)
+        return
+    if not is_equal_approx(rollup_unit.opening, 1.0) or not is_equal_approx(rollup_unit.unit_height, reference_unit_height):
+        push_error("Roll-up door travel or height mismatch")
+        get_tree().quit(1)
+        return
+    for slat in rollup_unit.slats:
+        if slat.position.y < rollup_unit.clear_height - 0.01 or slat.position.y > rollup_unit.unit_height:
+            push_error("Rolled curtain outside headroom")
+            get_tree().quit(1)
+            return
+    nearby = roll_index
+    use_nearby()
+    elapsed = 0.0
+    while doors[roll_index]["busy"] and elapsed < 10.0:
+        await get_tree().process_frame
+        elapsed += get_process_delta_time()
+    if doors[roll_index]["open"] or not is_zero_approx(rollup_unit.opening):
+        push_error("Roll-up door close regression")
         get_tree().quit(1)
         return
     # Independent collision fixture above the facility: one ordinary stair
