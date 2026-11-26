@@ -267,10 +267,16 @@ func _finish_successful_install() -> void:
     process_mode = Node.PROCESS_MODE_ALWAYS
     get_tree().paused = true
     _notice_dialog.title = "Update installed successfully"
-    _notice_dialog.dialog_text = ("Build %d installed successfully.\n\nRestarting Storage Game in 3 seconds." if restart else "Build %d installed successfully.\n\nStorage Game will close in 3 seconds. Reopen it to play the new build.") % _available_build
-    _notice_dialog.popup_centered(Vector2i(560, 240))
-    _notice_dialog.get_ok_button().hide()
-    await get_tree().create_timer(SUCCESS_DELAY, true, false, true).timeout
+    var action := "Restarting" if restart else "Closing"
+    var reopen_hint := "" if restart else "\nReopen the app to play the new build."
+    # Show a live countdown, not just a static three-second notice.
+    for seconds in range(int(SUCCESS_DELAY), 0, -1):
+        var unit := "second" if seconds == 1 else "seconds"
+        _notice_dialog.dialog_text = "Build %d installed successfully.\n\n%s Storage Game automatically in %d %s.%s" % [_available_build, action, seconds, unit, reopen_hint]
+        if not _notice_dialog.visible:
+            _notice_dialog.popup_centered(Vector2i(600, 250))
+        _notice_dialog.get_ok_button().hide()
+        await get_tree().create_timer(1.0, true, false, true).timeout
     if restart:
         OS.set_restart_on_exit(true)
     get_tree().quit(0)
