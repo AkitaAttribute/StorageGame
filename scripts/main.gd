@@ -6,6 +6,7 @@ const UNIT := "res://assets/unit.glb"
 const CHARACTER := "res://assets/locomotion.glb"
 const AVATAR := "res://assets/shino.glb"
 const HumanoidRetarget = preload("res://scripts/humanoid_retarget.gd")
+const HouseholdProps = preload("res://scripts/household_props.gd")
 const SPEED := 3.4
 const ROLLUP_SCENE = preload("res://scenes/rollup_unit.tscn")
 const CHARACTER_HEIGHT := 1.7
@@ -32,6 +33,9 @@ var movement_joystick: Control
 var stepped_last_frame := false
 var reference_unit_height := 2.4
 var rollup_unit: Node3D
+var household: HouseholdProps
+var force_pose_weight := 0.0
+var force_target := Vector3.ZERO
 var state: Dictionary = {}
 var doors: Array[Dictionary] = []
 var world: Node3D
@@ -54,7 +58,7 @@ var mobile := OS.get_name() == "Android"
 func _ready() -> void:
     # The mounted patch, not the original APK's updater, owns update dialogs.
     preload("res://scripts/update_bridge.gd").attach(self)
-    for pair in [["move_up", KEY_W], ["move_down", KEY_S], ["move_left", KEY_A], ["move_right", KEY_D], ["use", KEY_E]]:
+    for pair in [["move_up", KEY_W], ["move_down", KEY_S], ["move_left", KEY_A], ["move_right", KEY_D], ["use", KEY_E], ["grab", KEY_G]]:
         var action := StringName(pair[0])
         if not InputMap.has_action(action):
             InputMap.add_action(action)
@@ -135,7 +139,7 @@ func named_animation(ap: AnimationPlayer, needle: String) -> StringName:
 func start_game(data: Dictionary) -> void:
     if is_instance_valid(world):
         return
-    for path in [FACILITY, UNIT, CHARACTER, AVATAR]:
+    for path in [FACILITY, UNIT, CHARACTER, AVATAR, "res://assets/prop_fridge.glb", "res://assets/prop_desk.glb"]:
         if not (ResourceLoader.load(path) is PackedScene):
             OS.alert("Run python tools/fetch_assets.py and import the project first.", "Missing model assets")
             return
@@ -176,6 +180,7 @@ func start_game(data: Dictionary) -> void:
     make_rollup_unit(facility)
     player = CharacterBody3D.new()
     player.name = "Player"
+    player.collision_mask = 3
     player.floor_snap_length = STEP_HEIGHT + 0.04
     player.floor_max_angle = deg_to_rad(50.0)
     player.floor_constant_speed = true
@@ -234,10 +239,15 @@ func start_game(data: Dictionary) -> void:
     world.add_child(camera)
     camera.current = true
     camera_yaw = float(state.get("camera_yaw", 0.0))
-    camera_pitch = clampf(float(state.get("camera_pitch", 0.50)), 0.15, 1.22)
+    camera_pitch = clampf(float(state.get("camera_pitch", 0.50)), -0.18, 1.22)
     camera_target = player.position + Vector3.UP * CAMERA_TARGET_HEIGHT
     update_camera(0.0)
     create_hud()
+    household = HouseholdProps.new()
+    household.name = "HouseholdProps"
+    world.add_child(household)
+    household.setup(player, camera, hud, mobile)
+    household.spawn_items(state.get("props", {}))
     if not mobile and DisplayServer.get_name() != "headless":
         Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
     save_game()
@@ -433,7 +443,7 @@ func create_hud() -> void:
 
 func orbit_camera(relative: Vector2) -> void:
     camera_yaw = wrapf(camera_yaw - relative.x * CAMERA_SENSITIVITY, -PI, PI)
-    camera_pitch = clampf(camera_pitch + relative.y * CAMERA_SENSITIVITY, 0.15, 1.22)
+    camera_pitch = clampf(camera_pitch + relative.y * CAMERA_SENSITIVITY, -0.18, 1.22)
 
 func _input(event: InputEvent) -> void:
     if not is_instance_valid(player):
@@ -443,6 +453,10 @@ func _input(event: InputEvent) -> void:
             if not event.pressed:
                 if event.index == camera_touch:
                     camera_touch = -1
+                return
+            if is_instance_valid(household) and household.button.visible and household.button.get_global_rect().has_point(event.position):
+                household.toggle_grab()
+                get_viewport().set_input_as_handled()
                 return
             if is_instance_valid(use_button) and use_button.visible and use_button.get_global_rect().has_point(event.position):
                 use_nearby()
@@ -571,7 +585,12 @@ func _physics_process(delta: float) -> void:
         player.position = Vector3(-10.4, 0.1, 5)
         visual_step_offset = 0.0
         visual.position.y = 0.0
-    if direction.length() > 0.05:
+    if is_instance_valid(household) and is_instance_valid(household.held):
+        var facing := household.held.global_position - player.global_position
+        facing.y = 0.0
+        if facing.length_squared() > 0.01:
+            visual.rotation.y = lerp_angle(visual.rotation.y, atan2(facing.x, facing.z), minf(1.0, delta * 14.0))
+    elif direction.length() > 0.05:
         visual.rotation.y = lerp_angle(visual.rotation.y, atan2(direction.x, direction.z), minf(1.0, delta * 14.0))
     if animator != null:
         var displacement := player.position - previous_position
@@ -586,6 +605,16 @@ func _physics_process(delta: float) -> void:
             foot_offset = lerpf(foot_offset, retargeter.foot_ground_correction(), 1.0 - exp(-delta * 24.0))
             avatar_model.position.y = avatar_base_y + foot_offset
     update_camera(delta)
+    if is_instance_valid(household):
+        household.tick(delta)
+        if Input.is_action_just_pressed("grab"):
+            household.toggle_grab()
+        var holding := is_instance_valid(household.held)
+        if holding:
+            force_target = household.held.global_position
+        force_pose_weight = move_toward(force_pose_weight, 1.0 if holding else 0.0, delta * 6.0)
+        if avatar_ready and force_pose_weight > 0.0:
+            retargeter.apply_force_pose(force_target, force_pose_weight)
     update_nearby()
     if Input.is_action_just_pressed("use"):
         use_nearby()
@@ -655,6 +684,8 @@ func save_game() -> bool:
     state["rotation"] = visual.rotation.y
     state["camera_yaw"] = camera_yaw
     state["camera_pitch"] = camera_pitch
+    if is_instance_valid(household) and household.items.size() == HouseholdProps.DEFINITIONS.size():
+        state["props"] = household.snapshot()
     if not Saves.write_slot(state):
         push_warning("Unable to write save slot.")
         return false
@@ -687,6 +718,34 @@ func _smoke() -> void:
         push_error("Player, animations, or units failed to initialize")
         get_tree().quit(1)
         return
+    var prop_wait := 0
+    while household.items.size() < HouseholdProps.DEFINITIONS.size() and prop_wait < 60:
+        await get_tree().physics_frame
+        prop_wait += 1
+    if household.items.size() != HouseholdProps.DEFINITIONS.size():
+        push_error("Household prop placement failed")
+        get_tree().quit(1)
+        return
+    var test_prop: RigidBody3D = household.items[0]
+    household.grab(test_prop)
+    if not test_prop.freeze or not is_zero_approx(test_prop.gravity_scale):
+        push_error("Grab did not disable gravity")
+        get_tree().quit(1)
+        return
+    var right_arm: int = retargeter.target_keys["rightUpperArm"]
+    var arm_before := retargeter.target.get_bone_pose_rotation(right_arm)
+    retargeter.apply_force_pose(player.global_position + Vector3(1, 1.5, 1), 1.0)
+    if arm_before.angle_to(retargeter.target.get_bone_pose_rotation(right_arm)) < 0.01:
+        push_error("Right-arm grab pose failed")
+        get_tree().quit(1)
+        return
+    household.release_velocity = Vector3(2, 1, 0)
+    household.drop()
+    if test_prop.freeze or not is_equal_approx(test_prop.gravity_scale, 1.0) or not test_prop.linear_velocity.is_equal_approx(Vector3(2, 1, 0)):
+        push_error("Drop did not restore gravity and momentum")
+        get_tree().quit(1)
+        return
+    test_prop.linear_velocity = Vector3.ZERO
     var thigh: int = retargeter.target_keys["leftUpperLeg"]
     animator.play(walk)
     animator.advance(0.0)

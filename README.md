@@ -19,3 +19,6 @@ Pushes to main and manual runs build Windows EXE, Android APK and both platform 
 [Actions](https://github.com/AkitaAttribute/StorageGame/actions) · [Preview downloads](https://github.com/AkitaAttribute/StorageGame/releases/tag/preview)
 
 Facility GLBs are automatically dequantized to remove the unsupported KHR_mesh_quantization extension, preserving named animations. Asset files are fetched before import rather than committed as large binaries. Exports include the imported assets and do not need an asset download on first launch.
+
+## Household objects
+A fridge, desk and screwdriver spawn on checked, unobstructed ground-level footprints. Aim the center dot at a visible item within 2.1 m of the player's shoulder to highlight it. Press G on Windows or Grab on Android to move the item with the crosshair, then press again to drop it with gravity and recent motion velocity. The right arm aims toward the held item. Held objects sweep against walls and other objects, with no mass-dependent drag. Item positions are saved with each game slot.

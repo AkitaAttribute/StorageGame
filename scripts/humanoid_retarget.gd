@@ -166,3 +166,36 @@ func foot_ground_correction() -> float:
     # Maintain the lowest support foot at its calibrated rest height without
     # forcing the swinging foot down. This is root grounding, not full foot IK.
     return clampf(rest_foot_height - current, -0.24, 0.24)
+
+# Upper-body animation layer: keep the base walk/idle motion, then aim the
+# right upper arm and forearm toward the held object. Blend in/out in gameplay.
+func aim_arm_bone(bone: int, child: int, desired: Vector3, weight: float) -> void:
+    var pose := target.get_bone_global_pose(bone)
+    var child_pose := target.get_bone_global_pose(child)
+    var axis := child_pose.origin - pose.origin
+    if axis.length_squared() < 0.000001 or desired.length_squared() < 0.000001:
+        return
+    var turn := Quaternion(axis.normalized(), desired.normalized())
+    var basis := Basis(turn) * pose.basis.orthonormalized()
+    var parent := target.get_bone_parent(bone)
+    if parent >= 0:
+        basis = target.get_bone_global_pose(parent).basis.orthonormalized().inverse() * basis
+    var original := target.get_bone_pose_rotation(bone)
+    target.set_bone_pose_rotation(bone, original.slerp(basis.orthonormalized().get_rotation_quaternion(), weight))
+    target.force_update_all_bone_transforms()
+
+func apply_force_pose(world_point: Vector3, weight: float) -> void:
+    if target == null or not target_keys.has("rightUpperArm") or not target_keys.has("rightLowerArm") or not target_keys.has("rightHand"):
+        return
+    var upper: int = target_keys["rightUpperArm"]
+    var lower: int = target_keys["rightLowerArm"]
+    var hand: int = target_keys["rightHand"]
+    var point := target.to_local(world_point)
+    var shoulder := target.get_bone_global_pose(upper).origin
+    var toward := (point - shoulder).normalized()
+    # Keep a small outward/downward bend at the elbow, so the forearm
+    # reaches the object rather than locking the whole limb straight.
+    var outward := target_basis.inverse() * Vector3(-0.22, -0.19, 0.0)
+    aim_arm_bone(upper, lower, toward + outward, weight)
+    var elbow := target.get_bone_global_pose(lower).origin
+    aim_arm_bone(lower, hand, point - elbow, weight)

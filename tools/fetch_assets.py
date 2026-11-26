@@ -14,6 +14,8 @@ CACHE = ROOT / ".asset-cache"
 CACHE.mkdir(exist_ok=True)
 (CACHE / ".gdignore").touch()
 MODELS = {
+    "prop_fridge.glb": ("https://raw.githubusercontent.com/trebeljahr/quaternius-showcase/0128ca510d653bb04d6d1e4885bd8890b5050b4f/public/glb/house_interior_pack/Kitchen_Fridge.glb", 17360, "b9fb5c84c574c12b307911ccac567a5369731560"),
+    "prop_desk.glb": ("https://raw.githubusercontent.com/trebeljahr/quaternius-showcase/0128ca510d653bb04d6d1e4885bd8890b5050b4f/public/glb/house_interior_pack/Light_Desk.glb", 12832, "0fe724c7eca875db0e7907b1598c861325490eb0"),
     "facility.glb": ("https://cdn.3dassets.dev/assets/34733/v1/model.glb", 897836, None),
     "unit.glb": ("https://cdn.3dassets.dev/assets/34694/v1/model.glb", 26452, None),
     "shino.glb": ("https://raw.githubusercontent.com/madjin/vrm-samples/e16eb187100149a315ad92c3c9968f1d5baa6c7d/vroid/beta/Sendagaya_Shino.vrm", 15074328, "91f7c9e9ec990efb9de305e4c1d0e32a46498830"),
