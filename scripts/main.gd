@@ -9,6 +9,8 @@ const HumanoidRetarget = preload("res://scripts/humanoid_retarget.gd")
 const SPEED := 3.4
 const ROLLUP_SCENE = preload("res://scenes/rollup_unit.tscn")
 const CHARACTER_HEIGHT := 1.7
+const PLAYER_CAPSULE_HEIGHT := 1.65
+const PLAYER_CAPSULE_RADIUS := 0.27
 const REACH := 2.0
 const STEP_HEIGHT := 0.44
 const STEP_PRESENTATION_RATE := 1.8
@@ -182,10 +184,10 @@ func start_game(data: Dictionary) -> void:
     world.add_child(player)
     var collision := CollisionShape3D.new()
     var capsule := CapsuleShape3D.new()
-    capsule.radius = 0.27
-    capsule.height = 1.65
+    capsule.radius = PLAYER_CAPSULE_RADIUS
+    capsule.height = PLAYER_CAPSULE_HEIGHT
     collision.shape = capsule
-    collision.position.y = 0.825
+    collision.position.y = PLAYER_CAPSULE_HEIGHT * 0.5
     player.add_child(collision)
     visual = Node3D.new()
     visual.name = "CharacterVisual"
@@ -534,6 +536,8 @@ func _physics_process(delta: float) -> void:
         return
     var input := Input.get_vector("move_left", "move_right", "move_up", "move_down")
     var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw)
+    if is_instance_valid(rollup_unit):
+        direction = rollup_unit.filter_player_motion(player, direction, PLAYER_CAPSULE_HEIGHT, PLAYER_CAPSULE_RADIUS)
     var grounded := player.is_on_floor() or stepped_last_frame
     var previous_position := player.position
     player.velocity.x = direction.x * SPEED
@@ -551,6 +555,11 @@ func _physics_process(delta: float) -> void:
     if grounded and not player.is_on_floor() and player.velocity.y <= 0.0:
         player.apply_floor_snap()
     stepped_last_frame = stepped
+    if is_instance_valid(rollup_unit):
+        # Push before advancing the descending collision to avoid trapping
+        # the capsule inside a suddenly enlarged shape.
+        rollup_unit.push_player(player, delta, PLAYER_CAPSULE_HEIGHT, PLAYER_CAPSULE_RADIUS)
+        rollup_unit.advance_door(delta)
     var height_change := player.position.y - previous_position.y
     if grounded and absf(height_change) > 0.025:
         visual_step_offset = clampf(visual_step_offset - height_change, -0.30, 0.30)
@@ -613,14 +622,17 @@ func use_nearby() -> void:
     var opening := not bool(door["open"])
     var node: Node3D = door["node"]
     var local := node.to_local(player.position)
-    if not opening and absf(local.z - 1.42) < 0.55 and absf(local.x) < 1.6:
+    var rolling := node == rollup_unit
+    if not rolling and not opening and absf(local.z - 1.42) < 0.55 and absf(local.x) < 1.6:
         return
     var clip := named_animation(ap, "open" if opening else "close")
     if clip == &"":
         return
     door["busy"] = true
     var blocker: StaticBody3D = door["blocker"]
-    if not opening:
+    if rolling:
+        rollup_unit.start_door_motion(opening)
+    elif not opening:
         blocker.set_deferred("collision_layer", 1)
     ap.stop()
     ap.get_animation(clip).loop_mode = Animation.LOOP_NONE
@@ -628,7 +640,10 @@ func use_nearby() -> void:
     await ap.animation_finished
     door["open"] = opening
     door["busy"] = false
-    blocker.set_deferred("collision_layer", 0 if opening else 1)
+    if rolling:
+        rollup_unit.stop_door_motion()
+    else:
+        blocker.set_deferred("collision_layer", 0 if opening else 1)
     state["doors"][door["id"]] = opening
     save_game()
 
@@ -715,9 +730,21 @@ func _smoke() -> void:
     nearby = roll_index
     use_nearby()
     elapsed = 0.0
+    var observed_partial := false
     while doors[roll_index]["busy"] and elapsed < 10.0:
-        await get_tree().process_frame
-        elapsed += get_process_delta_time()
+        await get_tree().physics_frame
+        elapsed += get_physics_process_delta_time()
+        if rollup_unit.opening > 0.2 and rollup_unit.opening < 0.6:
+            var physical_bottom: float = rollup_unit.blocker.position.y - rollup_unit.blocker_shape.size.y * 0.5
+            if absf(physical_bottom - rollup_unit.bottom_edge) > 0.002 or rollup_unit.blocker.collision_layer != 1:
+                push_error("Rising curtain collider does not follow the bar")
+                get_tree().quit(1)
+                return
+            observed_partial = true
+    if not observed_partial or rollup_unit.blocker.collision_layer != 0:
+        push_error("Door collision did not clear during opening")
+        get_tree().quit(1)
+        return
     if not doors[roll_index]["open"] or not Saves.read_slot(str(initial["id"])).get("doors", {}).get("rollup_00", false):
         push_error("Roll-up door interaction or persistence failed")
         get_tree().quit(1)
@@ -731,12 +758,25 @@ func _smoke() -> void:
             push_error("Rolled curtain outside headroom")
             get_tree().quit(1)
             return
+    # Start closing while the actual player stands directly in the doorway.
+    var original_player_position := player.global_position
+    player.global_position = rollup_unit.to_global(Vector3(0.0, 0.03, 1.43))
+    player.velocity = Vector3.ZERO
+    await get_tree().physics_frame
+    await get_tree().physics_frame
     nearby = roll_index
     use_nearby()
     elapsed = 0.0
     while doors[roll_index]["busy"] and elapsed < 10.0:
-        await get_tree().process_frame
-        elapsed += get_process_delta_time()
+        await get_tree().physics_frame
+        elapsed += get_physics_process_delta_time()
+    var pushed_position: Vector3 = rollup_unit.to_local(player.global_position)
+    if absf(pushed_position.z - 1.42) < PLAYER_CAPSULE_RADIUS + 0.045:
+        push_error("Closing curtain did not push player clear")
+        get_tree().quit(1)
+        return
+    player.global_position = original_player_position
+    player.velocity = Vector3.ZERO
     if doors[roll_index]["open"] or not is_zero_approx(rollup_unit.opening):
         push_error("Roll-up door close regression")
         get_tree().quit(1)

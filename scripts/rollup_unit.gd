@@ -9,6 +9,11 @@ const FRONT := 1.42
 const FLOOR := 0.025
 const ROOF_THICKNESS := 0.08
 const WALL_THICKNESS := 0.08
+const CURTAIN_HALF_DEPTH := 0.05
+const BOTTOM_BAR_HALF_HEIGHT := 0.0225
+const PUSH_LEAD := 0.65
+const PUSH_SPEED := 1.45
+const PUSH_MARGIN := 0.035
 var unit_height := 2.4
 var clear_height := 1.9
 var radius := 0.19
@@ -17,6 +22,10 @@ var curtain_length := 1.9
 var slats: Array[Node3D] = []
 var bottom_bar: Node3D
 var blocker: StaticBody3D
+var blocker_shape: BoxShape3D
+var bottom_edge := 0.0
+var closing := false
+var push_side := 0.0
 var animator: AnimationPlayer
 var path_points: PackedVector2Array = []
 var path_lengths: PackedFloat32Array = []
@@ -124,12 +133,14 @@ func build(height: float, initially_open: bool) -> void:
         box(bottom_bar, Vector3(side * 0.12, 0.015, 0.020), Vector3(0.025, 0.055, 0.06), rail)
     box(bottom_bar, Vector3(1.13, 0.025, 0.032), Vector3(0.20, 0.065, 0.025), rail)
     box(bottom_bar, Vector3(1.20, 0.025, 0.052), Vector3(0.08, 0.025, 0.018), trim)
-    blocker = collision_box(self, Vector3(0, clear_height * 0.5, FRONT), Vector3(2.72, clear_height, 0.10))
-    blocker.collision_layer = 0 if initially_open else 1
+    blocker = collision_box(self, Vector3(0, clear_height * 0.5, FRONT), Vector3(2.72, clear_height, CURTAIN_HALF_DEPTH * 2.0))
+    blocker.name = "MovingCurtainCollision"
+    blocker_shape = (blocker.get_child(0) as CollisionShape3D).shape as BoxShape3D
     animator = AnimationPlayer.new()
     animator.name = "DoorAnimation"
     add_child(animator)
     animator.root_node = NodePath("..")
+    animator.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
     var library := AnimationLibrary.new()
     for clip in ["open", "close"]:
         var animation := Animation.new()
@@ -184,3 +195,91 @@ func update_curtain() -> void:
     for i in range(slats.size()):
         place_on_path(slats[i], travel + (float(i) + 0.5) * slat_pitch)
     place_on_path(bottom_bar, travel)
+    update_blocker()
+
+func update_blocker() -> void:
+    # The physical curtain covers only the opening above its lower edge.
+    # Once the bar enters the winding bay the doorway is entirely clear.
+    bottom_edge = clampf(bottom_bar.position.y - BOTTOM_BAR_HALF_HEIGHT, 0.0, clear_height)
+    var remaining := clear_height - bottom_edge
+    blocker_shape.size = Vector3(2.72, maxf(0.001, remaining), CURTAIN_HALF_DEPTH * 2.0)
+    blocker.position = Vector3(0, bottom_edge + remaining * 0.5, FRONT)
+    blocker.collision_layer = 1 if remaining > 0.001 else 0
+
+func start_door_motion(is_opening: bool) -> void:
+    closing = not is_opening
+    push_side = 0.0
+
+func advance_door(delta: float) -> void:
+    if animator.is_playing():
+        animator.advance(delta)
+
+func stop_door_motion() -> void:
+    closing = false
+    push_side = 0.0
+
+# The wedge begins at a rounded virtual tip above the character and grows
+# laterally as the bar comes down. The player is moved with collision sweeps,
+# not a teleport or a downward force. Both sides of the door are valid exits.
+func wedge_clearance(body: CharacterBody3D, height: float, capsule_radius: float) -> float:
+    if not closing:
+        return 0.0
+    var local := to_local(body.global_position)
+    if absf(local.x) > 1.36 + capsule_radius:
+        return 0.0
+    if local.y >= clear_height or local.y + height < 0.0:
+        return 0.0
+    # Use the actual bar position above the opening, not its clamped collider.
+    var head := local.y + height
+    var gap := bottom_bar.position.y - BOTTOM_BAR_HALF_HEIGHT - head
+    if gap >= PUSH_LEAD:
+        return 0.0
+    var depth := capsule_radius + CURTAIN_HALF_DEPTH + PUSH_MARGIN
+    # A circular arc gives a soft onset rather than a hard sideways impulse.
+    var progress := clampf(1.0 - gap / PUSH_LEAD, 0.0, 1.0)
+    return depth * sqrt(maxf(0.0, 1.0 - (1.0 - progress) * (1.0 - progress)))
+
+func door_normal() -> Vector3:
+    return global_transform.basis.z.normalized()
+
+func choose_push_side(body: CharacterBody3D, clearance: float) -> float:
+    var local := to_local(body.global_position)
+    var offset := local.z - FRONT
+    if push_side != 0.0:
+        return push_side
+    var preferred := 1.0 if offset >= 0.0 else -1.0
+    var normal := door_normal()
+    var destination := preferred * clearance - offset
+    # Prefer the nearest side, but use the other if a nearby wall blocks it.
+    if body.test_move(body.global_transform, normal * destination):
+        var alternate := -preferred * clearance - offset
+        if not body.test_move(body.global_transform, normal * alternate):
+            preferred = -preferred
+    push_side = preferred
+    return push_side
+
+func filter_player_motion(body: CharacterBody3D, direction: Vector3, height: float, capsule_radius: float) -> Vector3:
+    var clearance := wedge_clearance(body, height, capsule_radius)
+    var offset := to_local(body.global_position).z - FRONT
+    if clearance <= 0.0 or absf(offset) > capsule_radius + CURTAIN_HALF_DEPTH + PUSH_MARGIN + 0.10:
+        push_side = 0.0
+        return direction
+    var side := choose_push_side(body, capsule_radius + CURTAIN_HALF_DEPTH + PUSH_MARGIN)
+    var normal := door_normal()
+    var toward := direction.dot(normal) * side
+    if toward < 0.0:
+        return direction - normal * (toward * side)
+    return direction
+
+func push_player(body: CharacterBody3D, delta: float, height: float, capsule_radius: float) -> void:
+    var clearance := wedge_clearance(body, height, capsule_radius)
+    var offset := to_local(body.global_position).z - FRONT
+    var full_clearance := capsule_radius + CURTAIN_HALF_DEPTH + PUSH_MARGIN
+    if clearance <= 0.0 or absf(offset) > full_clearance + 0.10:
+        push_side = 0.0
+        return
+    var side := choose_push_side(body, full_clearance)
+    var distance := clearance - offset * side
+    if distance > 0.0:
+        body.move_and_collide(door_normal() * side * minf(distance, PUSH_SPEED * delta), false, 0.001)
+
