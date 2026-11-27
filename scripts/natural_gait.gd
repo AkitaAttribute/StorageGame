@@ -217,16 +217,16 @@ func calibrate_arm_pose() -> void:
             arm_reference[bone] = skeleton.get_bone_pose_rotation(bone)
         # Relaxed shoulder and elbow; the hand is slightly outboard of
         # the skirt. These are pose choices, not dynamic joint targets.
-        rig.aim_arm_bone(upper, lower, common.inverse() * Vector3(sign_side * 0.30, -1.0, -0.025), 1.0)
-        rig.aim_arm_bone(lower, hand, common.inverse() * Vector3(sign_side * 0.23, -1.0, 0.16), 1.0)
+        orient_arm_segment(upper, lower, Vector3(sign_side * 0.22, -1.0, -0.025))
+        orient_arm_segment(lower, hand, Vector3(sign_side * 0.12, -1.0, 0.16))
         stabilize_hand(side, sign_side)
         for bone in [upper, lower, hand]:
             arm_neutral[bone] = skeleton.get_bone_pose_rotation(bone)
             arm_previous[bone] = arm_neutral[bone]
         # A separate relaxed idle pose: elbows hang near the ribs and
         # hands rest against the skirt rather than clearing its widest hem.
-        rig.aim_arm_bone(upper, lower, common.inverse() * Vector3(sign_side * 0.20, -1.0, -0.075), 1.0)
-        rig.aim_arm_bone(lower, hand, common.inverse() * Vector3(sign_side * 0.025, -1.0, 0.15), 1.0)
+        orient_arm_segment(upper, lower, Vector3(sign_side * 0.25, -1.0, -0.075))
+        orient_arm_segment(lower, hand, Vector3(sign_side * 0.10, -1.0, 0.15))
         stabilize_hand(side, sign_side)
         for bone in [upper, lower, hand]:
             idle_neutral[bone] = skeleton.get_bone_pose_rotation(bone)
@@ -234,6 +234,26 @@ func calibrate_arm_pose() -> void:
         for bone in [upper, lower, hand]:
             skeleton.set_bone_pose_rotation(bone, arm_reference[bone])
         skeleton.force_update_all_bone_transforms()
+
+# Reconstruct the bone orientation using the avatar's own rest axes.
+# A shortest-arc aim from an arbitrarily twisted donor pose preserves its
+# axial twist; the elbow can then appear bent sideways even with good angles.
+# Match a rest flexion plane to a forward-facing anatomical plane instead.
+func orient_arm_segment(bone: int, child: int, direction: Vector3) -> void:
+    var common: Basis = rig.target_basis
+    var rest := skeleton.get_bone_global_rest(bone)
+    var rest_axis := (common * (skeleton.get_bone_global_rest(child).origin - rest.origin)).normalized()
+    var axis := direction.normalized()
+    var forward := Vector3.BACK
+    var rest_forward := (forward - rest_axis * forward.dot(rest_axis)).normalized()
+    var pose_forward := (forward - axis * forward.dot(axis)).normalized()
+    if rest_forward.length_squared() < 0.001 or pose_forward.length_squared() < 0.001:
+        rig.aim_arm_bone(bone, child, common.inverse() * direction, 1.0)
+        return
+    var from_frame := Basis(rest_axis, rest_forward, rest_axis.cross(rest_forward))
+    var to_frame := Basis(axis, pose_forward, axis.cross(pose_forward))
+    var desired := common.inverse() * to_frame * from_frame.inverse() * common * rest.basis
+    set_global_rotation(bone, desired, 1.0)
 
 # AnimGraph-style preparation: turn each donor clip into a complete
 # avatar-specific arm pose stream once. Match each clip's own mean pose
@@ -272,95 +292,58 @@ func prepare_arm_clip(state: String, ap: AnimationPlayer, clip: StringName, dono
                 means[bone] = mean.slerp(q, 1.0 / float(i + 1)).normalized()
         raw.append(pose)
     var samples: Array[Dictionary] = []
-    var offsets: Array[Dictionary] = []
     for i in range(ARM_CLIP_SAMPLES):
         ap.seek(duration * float(i) / float(ARM_CLIP_SAMPLES), true)
         donor.apply_pose()
         limit_torso(1.0 if moving else 0.0)
-        var base: Dictionary = {}
-        var required: Dictionary = {}
         for side in ["left", "right"]:
             var sign_side: float = arm_sides[side]
-            for suffix in ["UpperArm", "LowerArm", "Hand"]:
-                var bone: int = rig.target_keys[side + suffix]
+            var upper: int = rig.target_keys[side + "UpperArm"]
+            var lower: int = rig.target_keys[side + "LowerArm"]
+            var hand: int = rig.target_keys[side + "Hand"]
+            var common: Basis = rig.target_basis
+            # Transfer the authored rotation deltas, then extract the
+            # sagittal swing. Retain the timing of the source gait rather
+            # than inventing a separate procedural arm oscillator.
+            for bone in [upper, lower]:
                 var mean: Quaternion = means[bone]
                 var source_pose: Quaternion = raw[i][bone]
                 var neutral: Quaternion = arm_neutral[bone] if moving else idle_neutral[bone]
                 var motion := (mean.inverse() * source_pose).normalized()
-                # Idle retains the small authored weight shifts and
-                # breathing. Walking retains the donor's arm swing and
-                # elbow flexion, but wrists stay softly relaxed.
-                var gain := 1.0 if moving else 0.65
-                var limit := 45.0 if suffix == "UpperArm" else (30.0 if suffix == "LowerArm" else 10.0)
-                if not moving:
-                    limit = 8.0 if suffix != "Hand" else 4.0
+                var limit := 45.0 if moving else 5.0
+                var gain := 1.0 if moving else 0.35
                 var fraction := minf(gain, deg_to_rad(limit) / maxf(Quaternion.IDENTITY.angle_to(motion), 0.00001))
-                var rotation := (neutral * Quaternion.IDENTITY.slerp(motion, fraction)).normalized()
-                skeleton.set_bone_pose_rotation(bone, rotation)
-                base[bone] = rotation
+                skeleton.set_bone_pose_rotation(bone, (neutral * Quaternion.IDENTITY.slerp(motion, fraction)).normalized())
             skeleton.force_update_all_bone_transforms()
-            if not moving:
-                # Keep elbows just outside the shoulder line in the baked
-                # idle pose. Preserve the wrist target when correcting the
-                # elbow; do not rotate the entire arm away from the hip.
-                var upper: int = rig.target_keys[side + "UpperArm"]
-                var lower: int = rig.target_keys[side + "LowerArm"]
-                var hand: int = rig.target_keys[side + "Hand"]
-                var common: Basis = rig.target_basis
-                var axis := common * (skeleton.get_bone_global_pose(lower).origin - skeleton.get_bone_global_pose(upper).origin)
-                var down := maxf(0.001, -axis.y)
-                var lateral := axis.x * sign_side / down
-                if lateral < 0.18 or lateral > 0.30:
-                    var wrist := skeleton.get_bone_global_pose(hand).origin
-                    axis.x = sign_side * down * clampf(lateral, 0.18, 0.30)
-                    rig.aim_arm_bone(upper, lower, common.inverse() * axis, 1.0)
-                    var forearm := common * (wrist - skeleton.get_bone_global_pose(lower).origin)
-                    # Avoid overcompensating with an inward-folded forearm.
-                    var forearm_down := maxf(0.001, -forearm.y)
-                    forearm.x = sign_side * clampf(forearm.x * sign_side, -0.08 * forearm_down, 0.20 * forearm_down)
-                    rig.aim_arm_bone(lower, hand, common.inverse() * forearm, 1.0)
-                    base[upper] = skeleton.get_bone_pose_rotation(upper)
-                    base[lower] = skeleton.get_bone_pose_rotation(lower)
-            # Solve garment clearance on prepared keyframes, not in the
-            # live animation graph. Record the minimal extra abduction.
-            var applied := 0.0
-            for iteration in range(8 if moving else 0):
-                # Small preparation-only safety margin for interpolation
-                # between samples and changes in torso blend.
-                var overlap := hand_penetration(side, sign_side, 0.010)
-                if overlap <= 0.001 or applied >= deg_to_rad(32.0):
-                    break
-                var step := minf(deg_to_rad(32.0) - applied, clampf(overlap / 0.45, deg_to_rad(0.5), deg_to_rad(7.0)))
-                abduct_chain(side, sign_side, step)
-                applied += step
-            required[side] = applied
-        samples.append(base)
-        offsets.append(required)
-    # Smooth the clearance layer around the cycle (including the seam).
-    # Expand nearby corrections slightly rather than letting an isolated
-    # collision cause a sharp shoulder twitch.
-    var baked: Array[Dictionary] = []
-    var max_overlap := 0.0
-    for i in range(ARM_CLIP_SAMPLES):
-        ap.seek(duration * float(i) / float(ARM_CLIP_SAMPLES), true)
-        donor.apply_pose()
-        limit_torso(1.0 if moving else 0.0)
-        for bone in bones:
-            skeleton.set_bone_pose_rotation(bone, samples[i][bone])
+            var upper_axis := common * (skeleton.get_bone_global_pose(lower).origin - skeleton.get_bone_global_pose(upper).origin)
+            var lower_axis := common * (skeleton.get_bone_global_pose(hand).origin - skeleton.get_bone_global_pose(lower).origin)
+            var swing := clampf(atan2(upper_axis.z, -upper_axis.y), -0.52, 0.52) if moving else clampf(atan2(upper_axis.z, -upper_axis.y), -0.16, 0.05)
+            var flex := clampf(atan2(lower_axis.z, -lower_axis.y) - swing, 0.12, 0.45) if moving else 0.20
+            # Keep the elbow outboard, and flex the forearm forward, not
+            # sideways through the ribs. No whole-skirt bounding box.
+            var lateral := clampf(upper_axis.x * sign_side / maxf(0.001, -upper_axis.y), 0.18, 0.28) if moving else 0.25
+            orient_arm_segment(upper, lower, Vector3(sign_side * lateral, -1.0, tan(swing)))
+            orient_arm_segment(lower, hand, Vector3(sign_side * 0.10, -1.0, tan(swing + flex)))
+            var wrist: Quaternion = arm_neutral[hand] if moving else idle_neutral[hand]
+            skeleton.set_bone_pose_rotation(hand, wrist)
         skeleton.force_update_all_bone_transforms()
-        for side in ["left", "right"]:
-            var offset: float = offsets[i][side]
-            for neighbor in [-2, -1, 1, 2]:
-                var near_offset: float = offsets[posmod(i + neighbor, ARM_CLIP_SAMPLES)][side]
-                offset = maxf(offset, near_offset - deg_to_rad(2.0 * absf(float(neighbor))))
-            abduct_chain(side, float(arm_sides[side]), offset)
-            max_overlap = maxf(max_overlap, hand_penetration(side, float(arm_sides[side])))
         var output: Dictionary = {}
         for bone in bones:
             output[bone] = skeleton.get_bone_pose_rotation(bone)
+        samples.append(output)
+    # A circular filter preserves the seam and removes abrupt direction
+    # changes from retarget sampling, without any per-frame pose search.
+    var baked: Array[Dictionary] = []
+    for i in range(ARM_CLIP_SAMPLES):
+        var output: Dictionary = {}
+        for bone in bones:
+            var before: Quaternion = samples[posmod(i - 1, ARM_CLIP_SAMPLES)][bone]
+            var after: Quaternion = samples[(i + 1) % ARM_CLIP_SAMPLES][bone]
+            var center: Quaternion = samples[i][bone]
+            output[bone] = center.slerp(before.slerp(after, 0.5), 0.30).normalized()
         baked.append(output)
     arm_clips[state] = baked
-    print("ARM_CLIP ", state, " samples=", baked.size(), " undeformed_skirt_overlap=", max_overlap)
+    print("ARM_CLIP ", state, " samples=", baked.size(), " anatomical_flexion=true")
 
 func clip_arm_pose(state: String, phase: float, bone: int) -> Quaternion:
     if not arm_clips.has(state):

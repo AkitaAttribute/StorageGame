@@ -126,9 +126,12 @@ func surface_overlap(points: Array[Vector3], surface: PackedVector3Array, sign_s
         for cloth in surface:
             if (cloth.x - pelvis.x) * sign_side <= 0.015:
                 continue
-            if absf(cloth.y - hand.y) > 0.022 or absf(cloth.z - hand.z) > 0.024:
+            var dy := absf(cloth.y - hand.y)
+            var dz := absf(cloth.z - hand.z)
+            if dy >= 0.040 or dz >= 0.040:
                 continue
-            overlap = maxf(overlap, (cloth.x - hand.x) * sign_side + HAND_MARGIN)
+            var proximity := (1.0 - smoothstep(0.015, 0.040, dy)) * (1.0 - smoothstep(0.015, 0.040, dz))
+            overlap = maxf(overlap, maxf(0.0, (cloth.x - hand.x) * sign_side + HAND_MARGIN) * proximity)
     return overlap
 
 func reset_skirt_positions() -> void:
@@ -201,15 +204,11 @@ func solve_hand_skirt(delta: float, gait: RefCounted, holding: bool) -> void:
         var sign_side: float = gait.arm_sides[side]
         var overlap := surface_overlap(gait.hand_points(side), surface, sign_side)
         var previous: float = arm_residual[side]
-        var offset := maxf(0.0, previous - delta * deg_to_rad(60.0))
+        # Continuous low-pass contact. Do not solve multiple shoulder
+        # candidates in one tick or spread an arm into an A-pose.
+        var desired := clampf(overlap / 0.48, 0.0, deg_to_rad(10.0))
+        var offset := lerpf(previous, desired, 1.0 - exp(-delta * 12.0))
         gait.abduct_chain(side, sign_side, offset)
-        for iteration in range(6):
-            overlap = surface_overlap(gait.hand_points(side), surface, sign_side)
-            if overlap <= 0.001 or offset >= deg_to_rad(22.0):
-                break
-            var step := minf(deg_to_rad(22.0) - offset, clampf(overlap / 0.48, deg_to_rad(0.5), deg_to_rad(6.0)))
-            gait.abduct_chain(side, sign_side, step)
-            offset += step
         arm_residual[side] = offset
         last_contact_overlap = maxf(last_contact_overlap, surface_overlap(gait.hand_points(side), surface, sign_side))
 

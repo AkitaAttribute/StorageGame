@@ -984,20 +984,32 @@ func _smoke() -> void:
     animator.advance(0.0)
     var arm_min := {"left": INF, "right": INF}
     var arm_max := {"left": -INF, "right": -INF}
+    var walk_abduction := 0.0
+    var walk_forearm_angle := 0.0
     for frame in range(120):
         animator.advance(animator.get_animation(walk).length / 60.0)
         retargeter.apply_pose()
         # Match the gameplay pose pipeline and the clip preparation.
         natural_gait.limit_torso(1.0)
         natural_gait.keep_arms_clear(1.0 / 60.0, SPEED, false, "walk", animator.current_animation_position / animator.get_animation(walk).length)
+        secondary_collision.tick(1.0 / 60.0, natural_gait, false)
         if frame >= 60:
             for side in ["left", "right"]:
                 var arm: int = retargeter.target_keys[side + "UpperArm"]
                 var elbow: int = retargeter.target_keys[side + "LowerArm"]
                 var axis := retargeter.target_basis * (retargeter.target.get_bone_global_pose(elbow).origin - retargeter.target.get_bone_global_pose(arm).origin)
                 var swing := atan2(axis.z, -axis.y)
+                var wrist_bone: int = retargeter.target_keys[side + "Hand"]
+                var forearm := retargeter.target_basis * (retargeter.target.get_bone_global_pose(wrist_bone).origin - retargeter.target.get_bone_global_pose(elbow).origin)
+                walk_abduction = maxf(walk_abduction, rad_to_deg(atan2(absf(axis.x), maxf(0.001, -axis.y))))
+                walk_forearm_angle = maxf(walk_forearm_angle, rad_to_deg(atan2(absf(forearm.x), maxf(0.001, -forearm.y))))
                 arm_min[side] = minf(float(arm_min[side]), swing)
                 arm_max[side] = maxf(float(arm_max[side]), swing)
+    print("WALK_ARM_ENVELOPE upper=", walk_abduction, " forearm=", walk_forearm_angle)
+    if walk_abduction > 30.0 or walk_forearm_angle > 30.0:
+        push_error("Walking arms spread outside relaxed envelope")
+        get_tree().quit(1)
+        return
     for side in ["left", "right"]:
         var range_degrees := rad_to_deg(float(arm_max[side]) - float(arm_min[side]))
         print("ARM_SWING ", side, " degrees=", range_degrees)
@@ -1022,6 +1034,8 @@ func _smoke() -> void:
     var idle_compression := 0.0
     var idle_abduction := 0.0
     var idle_min_abduction := 90.0
+    var idle_max_step := 0.0
+    var idle_previous: Dictionary = {}
     for frame in range(120):
         animator.advance(1.0 / 60.0)
         retargeter.apply_pose()
@@ -1041,7 +1055,17 @@ func _smoke() -> void:
                 var signed_abduction := rad_to_deg(atan2(axis.x * float(natural_gait.arm_sides[side]), maxf(0.001, -axis.y)))
                 idle_abduction = maxf(idle_abduction, signed_abduction)
                 idle_min_abduction = minf(idle_min_abduction, signed_abduction)
-    print("FK_IDLE wrist_deviation=", idle_wrist_max, " deformed_clearance_overlap=", idle_overlap, " skirt_compression=", idle_compression, " abduction=", idle_abduction, " min_abduction=", idle_min_abduction)
+                for bone in [upper, lower, hand]:
+                    var pose := retargeter.target.get_bone_global_pose(bone).basis.get_rotation_quaternion()
+                    if idle_previous.has(bone):
+                        var previous: Quaternion = idle_previous[bone]
+                        idle_max_step = maxf(idle_max_step, rad_to_deg(previous.angle_to(pose)))
+                    idle_previous[bone] = pose
+    print("FK_IDLE wrist_deviation=", idle_wrist_max, " deformed_clearance_overlap=", idle_overlap, " skirt_compression=", idle_compression, " abduction=", idle_abduction, " min_abduction=", idle_min_abduction, " max_frame_step=", idle_max_step)
+    if idle_max_step > 5.0:
+        push_error("Idle arm animation has a discontinuous frame step")
+        get_tree().quit(1)
+        return
     if idle_min_abduction < 5.0 or idle_abduction > 30.0:
         push_error("Idle elbow leaves relaxed outward shoulder envelope")
         get_tree().quit(1)
