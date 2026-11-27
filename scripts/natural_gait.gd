@@ -225,8 +225,8 @@ func calibrate_arm_pose() -> void:
             arm_previous[bone] = arm_neutral[bone]
         # A separate relaxed idle pose: elbows hang near the ribs and
         # hands rest against the skirt rather than clearing its widest hem.
-        rig.aim_arm_bone(upper, lower, common.inverse() * Vector3(sign_side * 0.18, -1.0, -0.06), 1.0)
-        rig.aim_arm_bone(lower, hand, common.inverse() * Vector3(sign_side * 0.06, -1.0, 0.13), 1.0)
+        rig.aim_arm_bone(upper, lower, common.inverse() * Vector3(sign_side * 0.075, -1.0, -0.025), 1.0)
+        rig.aim_arm_bone(lower, hand, common.inverse() * Vector3(sign_side * 0.05, -1.0, 0.13), 1.0)
         stabilize_hand(side, sign_side)
         for bone in [upper, lower, hand]:
             idle_neutral[bone] = skeleton.get_bone_pose_rotation(bone)

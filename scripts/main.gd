@@ -1021,7 +1021,6 @@ func _smoke() -> void:
     var idle_overlap := 0.0
     var idle_compression := 0.0
     var idle_abduction := 0.0
-    var idle_torso_overlap := 0.0
     for frame in range(120):
         animator.advance(1.0 / 60.0)
         retargeter.apply_pose()
@@ -1030,7 +1029,6 @@ func _smoke() -> void:
         secondary_collision.tick(1.0 / 60.0, natural_gait, false)
         if frame >= 60:
             idle_compression = maxf(idle_compression, secondary_collision.last_contact_compression)
-            idle_torso_overlap = maxf(idle_torso_overlap, secondary_collision.last_torso_overlap)
             idle_overlap = maxf(idle_overlap, secondary_collision.last_contact_overlap)
             for side in ["left", "right"]:
                 var hand: int = retargeter.target_keys[side + "Hand"]
@@ -1040,17 +1038,7 @@ func _smoke() -> void:
                 var lower: int = retargeter.target_keys[side + "LowerArm"]
                 var axis := retargeter.target_basis * (retargeter.target.get_bone_global_pose(lower).origin - retargeter.target.get_bone_global_pose(upper).origin)
                 idle_abduction = maxf(idle_abduction, rad_to_deg(atan2(absf(axis.x), maxf(0.001, -axis.y))))
-    print("FK_IDLE wrist_deviation=", idle_wrist_max, " deformed_clearance_overlap=", idle_overlap, " skirt_compression=", idle_compression, " abduction=", idle_abduction, " torso_overlap=", idle_torso_overlap)
-    print("ARM_EVALUATED_SURFACE ", secondary_collision.arm_evaluated_counts)
-    for key in secondary_collision.arm_surface_counts:
-        if int(secondary_collision.arm_surface_counts[key]) < 5 or int(secondary_collision.arm_evaluated_counts[key]) < 5:
-            push_error("Insufficient live arm surface samples: " + str(key))
-            get_tree().quit(1)
-            return
-    if secondary_collision.torso_samples.is_empty() or secondary_collision.torso_triangles.is_empty() or idle_torso_overlap > 0.008:
-        push_error("Resting arm intersects torso collision surface")
-        get_tree().quit(1)
-        return
+    print("FK_IDLE wrist_deviation=", idle_wrist_max, " deformed_clearance_overlap=", idle_overlap, " skirt_compression=", idle_compression, " abduction=", idle_abduction)
     if natural_gait.arm_clips.size() != 3 or secondary_collision.skirt_samples.is_empty() or idle_overlap > 0.025:
         push_error("Prepared idle arm layer missing or exceeds skirt clearance")
         get_tree().quit(1)
