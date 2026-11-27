@@ -22,6 +22,7 @@ var arm_radii: Dictionary = {}
 var arm_radius_counts: Dictionary = {}
 var arm_rest_segments: Dictionary = {}
 var arm_radius_observations: Dictionary = {}
+var arm_weighted_points: Dictionary = {}
 var skirt_sample_bones: Dictionary = {}
 var skirt_rest_positions: Dictionary = {}
 var skirt_compression: Dictionary = {"left": 0.0, "right": 0.0}
@@ -53,14 +54,23 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
             var bone: int = rig.target_keys[key]
             arm_rest_segments[bone] = [common_rest(bone), common_rest(int(rig.target_keys[child])), key]
             arm_radius_observations[key] = []
+            arm_weighted_points[key] = []
     cache_skirt_surface(avatar)
     for key in arm_radius_observations:
         var observations: Array = arm_radius_observations[key]
+        # Some imported glTF skins use a bind-space different from the
+        # skeleton's rest transforms. Fit a transverse section of the
+        # strongly weighted vertex cloud if absolute joint alignment is
+        # unavailable. This still measures actual mesh thickness.
+        if observations.size() < 5:
+            observations = fit_weighted_radius(str(key))
         observations.sort()
         arm_radius_counts[key] = observations.size()
         var fallback := 0.030 if str(key).ends_with("UpperArm") else 0.025
         arm_radii[key] = fallback if observations.is_empty() else clampf(float(observations[mini(observations.size() - 1, int(observations.size() * 0.90))]), 0.015, 0.050)
     print("ARM_COLLISION_RADII ", arm_radii, " samples=", arm_radius_counts)
+    for key in arm_weighted_points:
+        print("ARM_WEIGHTED_VERTICES ", key, " count=", arm_weighted_points[key].size())
     print("SECONDARY_COLLISION hair=", groups["HAIR"].size(), " skirt=", groups["SKIRT"].size(), " skirt_width=", skirt_half_width, " surface_samples=", skirt_samples.size(), " torso_samples=", torso_samples.size())
 
 # Cache a spatially decimated set of actual skin-weighted fabric
@@ -116,25 +126,28 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                         influence += weight
                     if torso_bones.has(bone):
                         torso_influence += weight
+                    # Skin bind transforms operate on the unposed mesh
+                    # vertex, yielding a point in the influencing joint's
+                    # coordinate system. Reconstruct the actual rest
+                    # point before comparing it with rest segment axes.
+                    if weight >= 0.35 and arm_rest_segments.has(bone):
+                        var segment: Array = arm_rest_segments[bone]
+                        var start: Vector3 = segment[0]
+                        var finish: Vector3 = segment[1]
+                        var bind_local := skin.get_bind_pose(bind) * vertices[i]
+                        var rest_point := skeleton.get_bone_global_rest(bone) * bind_local
+                        var common_point: Vector3 = rig.target_basis * rest_point * float(rig.target_scale)
+                        var axis := finish - start
+                        var t := (common_point - start).dot(axis) / maxf(axis.length_squared(), 0.000001)
+                        arm_weighted_points[segment[2]].append(common_point)
+                        if weight >= 0.60 and t >= 0.25 and t <= 0.85:
+                            var radius := common_point.distance_to(start + axis * t)
+                            if radius > 0.005 and radius < 0.08:
+                                arm_radius_observations[segment[2]].append(radius)
                 if total < 0.001:
                     continue
                 var local := skeleton.to_local(mesh_node.to_global(vertices[i]))
                 var common: Vector3 = rig.target_basis * local * float(rig.target_scale)
-                # Radius samples exclude shoulder and wrist transitions,
-                # which contain joint blends rather than limb cross sections.
-                for j in range(ids.size()):
-                    var id: int = ids[j]
-                    if float(amounts[j]) < 0.65 or not arm_rest_segments.has(id):
-                        continue
-                    var segment: Array = arm_rest_segments[id]
-                    var start: Vector3 = segment[0]
-                    var finish: Vector3 = segment[1]
-                    var axis := finish - start
-                    var t := (common - start).dot(axis) / maxf(axis.length_squared(), 0.000001)
-                    if t >= 0.25 and t <= 0.85:
-                        var radius := common.distance_to(start + axis * t)
-                        if radius > 0.005 and radius < 0.08:
-                            arm_radius_observations[segment[2]].append(radius)
                 if influence < 0.25 and torso_influence < 0.90:
                     continue
                 var p: Vector3 = common - pelvis
@@ -157,6 +170,43 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                 if add_torso:
                     torso_occupied[cell] = true
                     torso_samples.append(sample)
+
+# A translation-independent cross-section fit for skins whose bind
+# coordinates don't align with the imported rest joint centers.
+func fit_weighted_radius(key: String) -> Array:
+    var points: Array = arm_weighted_points[key]
+    if points.size() < 5:
+        return []
+    var bone: int = rig.target_keys[key]
+    var segment: Array = arm_rest_segments[bone]
+    var start: Vector3 = segment[0]
+    var finish: Vector3 = segment[1]
+    var axis := (finish - start).normalized()
+    var projections: Array[float] = []
+    for point in points:
+        var p: Vector3 = point
+        projections.append((p - start).dot(axis))
+    projections.sort()
+    var lo := projections[int(projections.size() * 0.20)]
+    var hi := projections[mini(projections.size() - 1, int(projections.size() * 0.80))]
+    var radial_points: Array[Vector3] = []
+    var center := Vector3.ZERO
+    for point in points:
+        var p: Vector3 = point
+        var along := (p - start).dot(axis)
+        if along < lo or along > hi:
+            continue
+        var radial := p - start - axis * along
+        radial_points.append(radial)
+        center += radial
+    if radial_points.size() < 5:
+        return []
+    center /= float(radial_points.size())
+    var distances: Array = []
+    for radial in radial_points:
+        distances.append(radial.distance_to(center))
+    print("ARM_RADIUS_CROSS_SECTION ", key, " count=", distances.size(), " axial_range=", hi - lo)
+    return distances
 
 func skirt_surface() -> PackedVector3Array:
     return skinned_surface(skirt_samples)
