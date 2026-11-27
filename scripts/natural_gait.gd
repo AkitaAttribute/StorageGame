@@ -21,10 +21,16 @@ var skirt_half_width := 0.20
 var arm_reference: Dictionary = {}
 var arm_neutral: Dictionary = {}
 var arm_previous: Dictionary = {}
+var arm_clips: Dictionary = {}
+var arm_transition_from: Dictionary = {}
+var arm_state := ""
+var arm_transition := 1.0
+var arm_was_holding := false
+const ARM_CLIP_SAMPLES := 48
+const ARM_BLEND_SECONDS := 0.20
 var arm_sides: Dictionary = {}
 var hand_frames: Dictionary = {}
 var hand_samples: Dictionary = {}
-var arm_clearance: Dictionary = {"left": 0.0, "right": 0.0}
 # Conservative physical skirt envelope (metres), refined from skin vertices.
 var skirt_top := 0.10
 var skirt_bottom := -0.40
@@ -221,37 +227,146 @@ func calibrate_arm_pose() -> void:
             skeleton.set_bone_pose_rotation(bone, arm_reference[bone])
         skeleton.force_update_all_bone_transforms()
 
-# A single local-space FK layer for each free arm. Preserve the authored
-# rotation of shoulders, elbows and wrists relative to idle. Do not solve
-# their directions independently or force palms to face a world axis.
-func keep_arms_clear(delta: float, speed: float, holding: bool) -> void:
-    var activity := smoothstep(0.08, 2.5, speed)
-    var response := 1.0 - exp(-delta * 18.0)
+# AnimGraph-style preparation: turn each donor clip into a complete
+# avatar-specific arm pose stream once. Match each clip's own mean pose
+# instead of treating walking as a large offset from the first idle frame.
+# The independent idle/walk/backward streams share normalized phase with
+# the base animation; no per-joint target reconstruction during gameplay.
+func arm_bones() -> Array[int]:
+    var result: Array[int] = []
+    for side in ["left", "right"]:
+        for suffix in ["UpperArm", "LowerArm", "Hand"]:
+            result.append(int(rig.target_keys[side + suffix]))
+    return result
+
+func prepare_arm_clip(state: String, ap: AnimationPlayer, clip: StringName, donor: RefCounted, moving: bool) -> void:
+    if ap == null or clip == &"" or not ap.has_animation(clip):
+        return
+    var duration := ap.get_animation(clip).length
+    if duration <= 0.0:
+        return
+    var bones := arm_bones()
+    var means: Dictionary = {}
+    var raw: Array[Dictionary] = []
+    ap.play(clip)
+    ap.advance(0.0)
+    for i in range(ARM_CLIP_SAMPLES):
+        ap.seek(duration * float(i) / float(ARM_CLIP_SAMPLES), true)
+        donor.apply_pose()
+        var pose: Dictionary = {}
+        for bone in bones:
+            var q := skeleton.get_bone_pose_rotation(bone).normalized()
+            pose[bone] = q
+            if not means.has(bone):
+                means[bone] = q
+            else:
+                var mean: Quaternion = means[bone]
+                means[bone] = mean.slerp(q, 1.0 / float(i + 1)).normalized()
+        raw.append(pose)
+    var samples: Array[Dictionary] = []
+    var offsets: Array[Dictionary] = []
+    for i in range(ARM_CLIP_SAMPLES):
+        ap.seek(duration * float(i) / float(ARM_CLIP_SAMPLES), true)
+        donor.apply_pose()
+        limit_torso(1.0 if moving else 0.0)
+        var base: Dictionary = {}
+        var required: Dictionary = {}
+        for side in ["left", "right"]:
+            var sign_side: float = arm_sides[side]
+            for suffix in ["UpperArm", "LowerArm", "Hand"]:
+                var bone: int = rig.target_keys[side + suffix]
+                var mean: Quaternion = means[bone]
+                var source_pose: Quaternion = raw[i][bone]
+                var neutral: Quaternion = arm_neutral[bone]
+                var motion := (mean.inverse() * source_pose).normalized()
+                # Idle retains the small authored weight shifts and
+                # breathing. Walking retains the donor's arm swing and
+                # elbow flexion, but wrists stay softly relaxed.
+                var gain := 1.0 if moving else 0.65
+                var limit := 45.0 if suffix == "UpperArm" else (30.0 if suffix == "LowerArm" else 10.0)
+                if not moving:
+                    limit = 8.0 if suffix != "Hand" else 4.0
+                var fraction := minf(gain, deg_to_rad(limit) / maxf(Quaternion.IDENTITY.angle_to(motion), 0.00001))
+                var rotation := (neutral * Quaternion.IDENTITY.slerp(motion, fraction)).normalized()
+                skeleton.set_bone_pose_rotation(bone, rotation)
+                base[bone] = rotation
+            skeleton.force_update_all_bone_transforms()
+            # Solve garment clearance on prepared keyframes, not in the
+            # live animation graph. Record the minimal extra abduction.
+            var applied := 0.0
+            for iteration in range(8):
+                var overlap := hand_penetration(side, sign_side)
+                if overlap <= 0.001 or applied >= deg_to_rad(32.0):
+                    break
+                var step := minf(deg_to_rad(32.0) - applied, clampf(overlap / 0.45, deg_to_rad(0.5), deg_to_rad(7.0)))
+                abduct_chain(side, sign_side, step)
+                applied += step
+            required[side] = applied
+        samples.append(base)
+        offsets.append(required)
+    # Smooth the clearance layer around the cycle (including the seam).
+    # Expand nearby corrections slightly rather than letting an isolated
+    # collision cause a sharp shoulder twitch.
+    var baked: Array[Dictionary] = []
+    var max_overlap := 0.0
+    for i in range(ARM_CLIP_SAMPLES):
+        ap.seek(duration * float(i) / float(ARM_CLIP_SAMPLES), true)
+        donor.apply_pose()
+        limit_torso(1.0 if moving else 0.0)
+        for bone in bones:
+            skeleton.set_bone_pose_rotation(bone, samples[i][bone])
+        skeleton.force_update_all_bone_transforms()
+        for side in ["left", "right"]:
+            var offset: float = offsets[i][side]
+            for neighbor in [-2, -1, 1, 2]:
+                var near_offset: float = offsets[posmod(i + neighbor, ARM_CLIP_SAMPLES)][side]
+                offset = maxf(offset, near_offset - deg_to_rad(2.0 * absf(float(neighbor))))
+            abduct_chain(side, float(arm_sides[side]), offset)
+            max_overlap = maxf(max_overlap, hand_penetration(side, float(arm_sides[side])))
+        var output: Dictionary = {}
+        for bone in bones:
+            output[bone] = skeleton.get_bone_pose_rotation(bone)
+        baked.append(output)
+    arm_clips[state] = baked
+    print("ARM_CLIP ", state, " samples=", baked.size(), " clearance_overlap=", max_overlap)
+
+func clip_arm_pose(state: String, phase: float, bone: int) -> Quaternion:
+    if not arm_clips.has(state):
+        return arm_neutral[bone]
+    var frames: Array = arm_clips[state]
+    var cursor := fposmod(phase, 1.0) * float(frames.size())
+    var first := floori(cursor)
+    var second := (first + 1) % frames.size()
+    var left: Quaternion = frames[first][bone]
+    var right: Quaternion = frames[second][bone]
+    return left.slerp(right, cursor - float(first)).normalized()
+
+# A masked pose layer, with a single state-transition blend. The holding
+# arm is excluded; the free arm continues to play its complete clip.
+func keep_arms_clear(delta: float, _speed: float, holding: bool, state: String = "idle", phase: float = 0.0) -> void:
+    if state != arm_state or holding != arm_was_holding:
+        arm_transition_from = arm_previous.duplicate()
+        # On release, start the formerly aimed arm from its current pose.
+        if arm_was_holding and not holding:
+            for suffix in ["UpperArm", "LowerArm", "Hand"]:
+                var right_bone: int = rig.target_keys["right" + suffix]
+                arm_transition_from[right_bone] = skeleton.get_bone_pose_rotation(right_bone)
+        arm_transition = 0.0
+        arm_state = state
+        arm_was_holding = holding
+    arm_transition = minf(1.0, arm_transition + delta / ARM_BLEND_SECONDS)
+    var blend := smoothstep(0.0, 1.0, arm_transition)
     for side in ["left", "right"]:
         if holding and side == "right":
             continue
-        var upper: int = rig.target_keys[side + "UpperArm"]
-        var lower: int = rig.target_keys[side + "LowerArm"]
-        var hand: int = rig.target_keys[side + "Hand"]
-        for bone in [upper, lower, hand]:
-            var reference: Quaternion = arm_reference[bone]
-            var neutral: Quaternion = arm_neutral[bone]
-            var authored := skeleton.get_bone_pose_rotation(bone)
-            var motion := (reference.inverse() * authored).normalized()
-            # Keep the source animation's timing and relative rotations,
-            # including subtle idle movement. Bound only extreme retarget
-            # mismatches from differing skeleton axes or clip transitions.
-            var maximum := deg_to_rad(50.0 if bone == upper else (35.0 if bone == lower else 12.0))
-            var gain := lerpf(0.65, 1.0, activity)
-            var angle := Quaternion.IDENTITY.angle_to(motion)
-            var fraction := minf(gain, maximum / maxf(angle, 0.00001))
-            var desired := (neutral * Quaternion.IDENTITY.slerp(motion, fraction)).normalized()
-            var previous: Quaternion = arm_previous[bone]
-            var corrected := previous.slerp(desired, response).normalized()
+        for suffix in ["UpperArm", "LowerArm", "Hand"]:
+            var bone: int = rig.target_keys[side + suffix]
+            var desired := clip_arm_pose(state, phase, bone)
+            var from: Quaternion = arm_transition_from.get(bone, arm_neutral[bone])
+            var corrected := from.slerp(desired, blend).normalized()
             arm_previous[bone] = corrected
             skeleton.set_bone_pose_rotation(bone, corrected)
-        skeleton.force_update_all_bone_transforms()
-        constrain_hand(side, float(arm_sides[side]), delta)
+    skeleton.force_update_all_bone_transforms()
 
 # This is used only once during calibration. In gameplay the wrist
 # inherits forearm rotation through FK and retains authored local motion.
@@ -318,22 +433,6 @@ func abduct_chain(side: String, sign_side: float, radians: float) -> void:
     var pose := skeleton.get_bone_global_pose(bone).basis.orthonormalized()
     var turn := common.inverse() * Basis(Vector3.BACK, sign_side * radians) * common
     set_global_rotation(bone, turn * pose, 1.0)
-
-func constrain_hand(side: String, sign_side: float, delta: float) -> void:
-    var old := float(arm_clearance[side])
-    var applied := maxf(0.0, old - delta * deg_to_rad(40.0))
-    abduct_chain(side, sign_side, applied)
-    # A few bounded angular corrections are enough for a normal arm.
-    # Immediate attack prevents clipping; slow release avoids twitching
-    # when a fingertip enters or leaves the skirt envelope.
-    for i in range(5):
-        var overlap := hand_penetration(side, sign_side)
-        if overlap <= 0.001 or applied >= deg_to_rad(26.0):
-            break
-        var step := minf(deg_to_rad(26.0) - applied, clampf(overlap / 0.45, deg_to_rad(1.0), deg_to_rad(8.0)))
-        abduct_chain(side, sign_side, step)
-        applied += step
-    arm_clearance[side] = applied
 
 func ground_at(point: Vector3) -> Dictionary:
     var query := PhysicsRayQueryParameters3D.create(point + Vector3.UP * 0.40, point - Vector3.UP * 0.55, 1, [player.get_rid()])
@@ -422,7 +521,7 @@ func contact_step(side: String, delta: float, turning: bool, grounded: bool) -> 
         terrain_target.y = minf(terrain_target.y, animated.y + 0.10)
         solve_leg(side, terrain_target, 0.55)
 
-func tick(delta: float, velocity: Vector3, grounded: bool, holding: bool) -> void:
+func tick(delta: float, velocity: Vector3, grounded: bool, holding: bool, state: String = "idle", phase: float = 0.0) -> void:
     if not ready:
         return
     var facing := visual.global_transform.basis.z.normalized()
@@ -432,7 +531,7 @@ func tick(delta: float, velocity: Vector3, grounded: bool, holding: bool) -> voi
     last_root = player.global_position
     var speed := Vector2(velocity.x, velocity.z).length()
     limit_torso(smoothstep(0.08, 2.5, speed))
-    keep_arms_clear(delta, speed, holding)
+    keep_arms_clear(delta, speed, holding, state, phase)
     var correction := clampf(float(rig.foot_ground_correction()), -0.065, 0.065) if grounded else 0.0
     pelvis_offset = lerpf(pelvis_offset, correction, 1.0 - exp(-delta * 12.0))
     avatar.position.y = base_y + pelvis_offset

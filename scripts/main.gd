@@ -296,6 +296,15 @@ func start_game(data: Dictionary) -> void:
                             directional_animator.get_animation(clip).loop_mode = Animation.LOOP_LINEAR
                             break
                 print("DIRECTIONAL_RIG ", direction_clips, " imported=", directional_animator.get_animation_list())
+        # Prepare masked arm streams once, with the same donor clips that
+        # drive the existing lower-body locomotion.
+        natural_gait.prepare_arm_clip("idle", animator, idle, retargeter, false)
+        natural_gait.prepare_arm_clip("walk", animator, walk, retargeter, true)
+        if direction_clips.has("bwd"):
+            natural_gait.prepare_arm_clip("backward", directional_animator, direction_clips["bwd"], directional_rig, true)
+        animator.play(idle)
+        animator.seek(0.0, true)
+        retargeter.apply_pose()
     camera = Camera3D.new()
     camera.fov = 65
     camera.near = 0.035
@@ -726,7 +735,12 @@ func _physics_process(delta: float) -> void:
             animate_directional(delta, animation_velocity, moving, requested_suffix)
             if natural_gait != null and natural_gait.ready:
                 var holding_prop := is_instance_valid(household) and is_instance_valid(household.held)
-                natural_gait.tick(delta, displacement / maxf(delta, 0.001), player.is_on_floor() or stepped_last_frame, holding_prop)
+                var arm_state := "idle" if not moving else ("backward" if gait_directional else "walk")
+                var arm_player := directional_animator if gait_directional else animator
+                var arm_phase := 0.0
+                if arm_player != null and gait_clip != &"" and arm_player.has_animation(gait_clip):
+                    arm_phase = arm_player.current_animation_position / maxf(arm_player.get_animation(gait_clip).length, 0.001)
+                natural_gait.tick(delta, displacement / maxf(delta, 0.001), player.is_on_floor() or stepped_last_frame, holding_prop, arm_state, arm_phase)
             else:
                 foot_offset = lerpf(foot_offset, retargeter.foot_ground_correction(), 1.0 - exp(-delta * 24.0))
                 avatar_model.position.y = avatar_base_y + foot_offset
@@ -973,7 +987,7 @@ func _smoke() -> void:
     for frame in range(120):
         animator.advance(animator.get_animation(walk).length / 60.0)
         retargeter.apply_pose()
-        natural_gait.keep_arms_clear(1.0 / 60.0, SPEED, false)
+        natural_gait.keep_arms_clear(1.0 / 60.0, SPEED, false, "walk", animator.current_animation_position / animator.get_animation(walk).length)
         if frame >= 60:
             for side in ["left", "right"]:
                 var arm: int = retargeter.target_keys[side + "UpperArm"]
@@ -1006,7 +1020,7 @@ func _smoke() -> void:
     for frame in range(120):
         animator.advance(1.0 / 60.0)
         retargeter.apply_pose()
-        natural_gait.keep_arms_clear(1.0 / 60.0, 0.0, false)
+        natural_gait.keep_arms_clear(1.0 / 60.0, 0.0, false, "idle", animator.current_animation_position / animator.get_animation(idle).length)
         if frame >= 60:
             for side in ["left", "right"]:
                 var hand: int = retargeter.target_keys[side + "Hand"]
@@ -1014,6 +1028,10 @@ func _smoke() -> void:
                 idle_wrist_max = maxf(idle_wrist_max, rad_to_deg(neutral.angle_to(retargeter.target.get_bone_pose_rotation(hand))))
                 idle_overlap = maxf(idle_overlap, natural_gait.hand_penetration(side, float(natural_gait.arm_sides[side])))
     print("FK_IDLE wrist_deviation=", idle_wrist_max, " clearance_overlap=", idle_overlap)
+    if natural_gait.arm_clips.size() != 3 or idle_overlap > 0.025:
+        push_error("Prepared idle arm layer missing or exceeds skirt clearance")
+        get_tree().quit(1)
+        return
     if idle_wrist_max > 12.1:
         push_error("Idle wrist exceeded local retarget limit")
         get_tree().quit(1)
