@@ -15,14 +15,13 @@ var last_facing := Vector3.FORWARD
 var last_root := Vector3.ZERO
 var pelvis_offset := 0.0
 var skirt_half_width := 0.20
-# Presentation defaults for Shino, not population-wide anatomical limits.
-const ARM_IDLE_ABDUCTION := 17.0
-const ARM_SWING_ABDUCTION := 15.0
-const ARM_MAX_SWING := 23.0
-const ARM_RESPONSE := 18.0
-var arm_angles: Dictionary = {"left": 0.0, "right": 0.0}
-var elbow_angles: Dictionary = {"left": 9.0, "right": 9.0}
-var arm_activity := 0.0
+# Character-specific retarget pose. Preserve the animated local joint
+# deltas and let children inherit the parent motion (FK). The calibrated
+# pose is not the model's T-pose or a world-space wrist target.
+var arm_reference: Dictionary = {}
+var arm_neutral: Dictionary = {}
+var arm_previous: Dictionary = {}
+var arm_sides: Dictionary = {}
 var hand_frames: Dictionary = {}
 var hand_samples: Dictionary = {}
 var arm_clearance: Dictionary = {"left": 0.0, "right": 0.0}
@@ -50,6 +49,7 @@ func setup(retargeter: RefCounted, body: CharacterBody3D, visual_root: Node3D, a
     last_facing = visual.global_transform.basis.z.normalized()
     last_root = player.global_position
     setup_hand_geometry()
+    calibrate_arm_pose()
     measure_skirt_geometry()
     ready = true
 
@@ -105,7 +105,10 @@ func setup_hand_geometry() -> void:
                 var curl_axis := axis.normalized().cross(palm).normalized()
                 if curl_axis.length_squared() < 0.001:
                     continue
-                var curl := deg_to_rad(12.0 if joint == "Intermediate" else 8.0)
+                # A relaxed hand has a small graded finger curl, not four
+                # identical straight fingers. Preserve the model's thumb.
+                var digit_gain := 0.85 if finger == "Index" else (1.0 if finger == "Middle" else (1.15 if finger == "Ring" else 1.30))
+                var curl := deg_to_rad((15.0 if joint == "Intermediate" else 9.0) * digit_gain)
                 var rotated := Basis(curl_axis, curl) * rest_bone.basis
                 var local := skeleton.get_bone_global_rest(parent).basis.inverse() * rotated
                 skeleton.set_bone_pose_rotation(bone, local.orthonormalized().get_rotation_quaternion())
@@ -189,60 +192,69 @@ func limit_torso(activity: float) -> void:
         euler.y = clampf(euler.y * yaw_gain, -deg_to_rad(20.0), deg_to_rad(20.0))
         set_global_rotation(bone, common.inverse() * Basis.from_euler(euler) * common * rest, 1.0)
 
-# Walking arms behave as lightly driven pendulums. Use the authored arm
-# motion and contralateral thigh phase as input, not a new stride oscillator.
-# Collins et al. 2009, Bruening et al. 2015 and 2020, and Yegian et al. 2019.
-func keep_arms_clear(delta: float, speed: float, holding: bool) -> void:
+# Production retargeting pattern: calibrate an avatar-specific base pose,
+# then transfer the animation relative to that pose. The idle reference
+# is sampled once from the existing authored idle animation.
+func calibrate_arm_pose() -> void:
     var common: Basis = rig.target_basis
+    for side in ["left", "right"]:
+        var upper: int = rig.target_keys[side + "UpperArm"]
+        var lower: int = rig.target_keys[side + "LowerArm"]
+        var hand: int = rig.target_keys[side + "Hand"]
+        var rest_axis := skeleton.get_bone_global_rest(lower).origin - skeleton.get_bone_global_rest(upper).origin
+        var sign_side := signf((common * rest_axis).x)
+        if is_zero_approx(sign_side):
+            sign_side = 1.0 if side == "left" else -1.0
+        arm_sides[side] = sign_side
+        for bone in [upper, lower, hand]:
+            arm_reference[bone] = skeleton.get_bone_pose_rotation(bone)
+        # Relaxed shoulder and elbow; the hand is slightly outboard of
+        # the skirt. These are pose choices, not dynamic joint targets.
+        rig.aim_arm_bone(upper, lower, common.inverse() * Vector3(sign_side * 0.30, -1.0, -0.025), 1.0)
+        rig.aim_arm_bone(lower, hand, common.inverse() * Vector3(sign_side * 0.23, -1.0, 0.16), 1.0)
+        stabilize_hand(side, sign_side)
+        for bone in [upper, lower, hand]:
+            arm_neutral[bone] = skeleton.get_bone_pose_rotation(bone)
+            arm_previous[bone] = arm_neutral[bone]
+        # Do not leave the calibration applied to the donor animation.
+        for bone in [upper, lower, hand]:
+            skeleton.set_bone_pose_rotation(bone, arm_reference[bone])
+        skeleton.force_update_all_bone_transforms()
+
+# A single local-space FK layer for each free arm. Preserve the authored
+# rotation of shoulders, elbows and wrists relative to idle. Do not solve
+# their directions independently or force palms to face a world axis.
+func keep_arms_clear(delta: float, speed: float, holding: bool) -> void:
     var activity := smoothstep(0.08, 2.5, speed)
-    arm_activity = lerpf(arm_activity, activity, 1.0 - exp(-delta * 10.0))
-    var response := 1.0 - exp(-delta * ARM_RESPONSE)
+    var response := 1.0 - exp(-delta * 18.0)
     for side in ["left", "right"]:
         if holding and side == "right":
             continue
         var upper: int = rig.target_keys[side + "UpperArm"]
         var lower: int = rig.target_keys[side + "LowerArm"]
         var hand: int = rig.target_keys[side + "Hand"]
-        var other := "right" if side == "left" else "left"
-        var thigh: int = rig.target_keys[other + "UpperLeg"]
-        var shin: int = rig.target_keys[other + "LowerLeg"]
-        var shoulder := skeleton.get_bone_global_pose(upper).origin
-        var elbow := skeleton.get_bone_global_pose(lower).origin
-        var wrist := skeleton.get_bone_global_pose(hand).origin
-        var rest_axis := skeleton.get_bone_global_rest(lower).origin - skeleton.get_bone_global_rest(upper).origin
-        var sign_side := signf((common * rest_axis).x)
-        if is_zero_approx(sign_side):
-            sign_side = 1.0 if side == "left" else -1.0
-        var authored_upper := (common * (elbow - shoulder)).normalized()
-        var authored_forearm := (common * (wrist - elbow)).normalized()
-        var opposite_leg := (common * (skeleton.get_bone_global_pose(shin).origin - skeleton.get_bone_global_pose(thigh).origin)).normalized()
-        var leg_angle := atan2(opposite_leg.z, maxf(0.25, -opposite_leg.y))
-        var authored_angle := atan2(authored_upper.z, maxf(0.25, -authored_upper.y))
-        # Preserve the sign and phase of actual leg motion, even if donor
-        # shoulder movement is too small. No forced swing when stationary.
-        var desired := clampf(lerpf(authored_angle * 1.25, leg_angle * 0.90, 0.60), -deg_to_rad(ARM_MAX_SWING), deg_to_rad(ARM_MAX_SWING)) * arm_activity
-        var swing := lerpf(float(arm_angles[side]), desired, response)
-        arm_angles[side] = swing
-        var authored_bend := rad_to_deg(authored_upper.angle_to(authored_forearm))
-        var flex := lerpf(9.0, clampf(authored_bend * 0.65 + 5.0, 7.0, 25.0), arm_activity)
-        flex += maxf(0.0, sin(swing)) * 10.0 * arm_activity
-        var elbow_flex := lerpf(float(elbow_angles[side]), flex, response)
-        elbow_angles[side] = elbow_flex
-        var abduct := deg_to_rad(lerpf(ARM_IDLE_ABDUCTION, ARM_SWING_ABDUCTION, arm_activity))
-        # Keep the elbows naturally outside the torso. The forearm can
-        # swing independently without forcing the wrist inward.
-        var lateral := sign_side * sin(abduct)
-        var upper_dir := Vector3(lateral, -cos(abduct) * cos(swing), cos(abduct) * sin(swing)).normalized()
-        var fore_angle := swing + deg_to_rad(elbow_flex)
-        var lower_dir := Vector3(lateral * 0.78, -cos(fore_angle), sin(fore_angle)).normalized()
-        rig.aim_arm_bone(upper, lower, common.inverse() * upper_dir, 1.0)
-        rig.aim_arm_bone(lower, hand, common.inverse() * lower_dir, 1.0)
-        stabilize_hand(side, sign_side)
-        constrain_hand(side, sign_side, delta)
+        for bone in [upper, lower, hand]:
+            var reference: Quaternion = arm_reference[bone]
+            var neutral: Quaternion = arm_neutral[bone]
+            var authored := skeleton.get_bone_pose_rotation(bone)
+            var motion := (reference.inverse() * authored).normalized()
+            # Keep the source animation's timing and relative rotations,
+            # including subtle idle movement. Bound only extreme retarget
+            # mismatches from differing skeleton axes or clip transitions.
+            var maximum := deg_to_rad(50.0 if bone == upper else (35.0 if bone == lower else 12.0))
+            var gain := lerpf(0.65, 1.0, activity)
+            var angle := Quaternion.IDENTITY.angle_to(motion)
+            var fraction := minf(gain, maximum / maxf(angle, 0.00001))
+            var desired := (neutral * Quaternion.IDENTITY.slerp(motion, fraction)).normalized()
+            var previous: Quaternion = arm_previous[bone]
+            var corrected := previous.slerp(desired, response).normalized()
+            arm_previous[bone] = corrected
+            skeleton.set_bone_pose_rotation(bone, corrected)
+        skeleton.force_update_all_bone_transforms()
+        constrain_hand(side, float(arm_sides[side]), delta)
 
-# Keep thumbs forward and palms inward. The hand's basis is derived from
-# its own finger joints; a stable anatomical frame eliminates donor wrist
-# twisting and frame-to-frame slerps toward a different rest orientation.
+# This is used only once during calibration. In gameplay the wrist
+# inherits forearm rotation through FK and retains authored local motion.
 func stabilize_hand(side: String, sign_side: float) -> void:
     var hand: int = rig.target_keys[side + "Hand"]
     var lower: int = rig.target_keys[side + "LowerArm"]
@@ -311,7 +323,6 @@ func constrain_hand(side: String, sign_side: float, delta: float) -> void:
     var old := float(arm_clearance[side])
     var applied := maxf(0.0, old - delta * deg_to_rad(40.0))
     abduct_chain(side, sign_side, applied)
-    stabilize_hand(side, sign_side)
     # A few bounded angular corrections are enough for a normal arm.
     # Immediate attack prevents clipping; slow release avoids twitching
     # when a fingertip enters or leaves the skirt envelope.
@@ -321,7 +332,6 @@ func constrain_hand(side: String, sign_side: float, delta: float) -> void:
             break
         var step := minf(deg_to_rad(26.0) - applied, clampf(overlap / 0.45, deg_to_rad(1.0), deg_to_rad(8.0)))
         abduct_chain(side, sign_side, step)
-        stabilize_hand(side, sign_side)
         applied += step
     arm_clearance[side] = applied
 

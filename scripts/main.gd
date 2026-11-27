@@ -997,6 +997,34 @@ func _smoke() -> void:
         push_error("Anatomical hand rig failed to initialize")
         get_tree().quit(1)
         return
+    # Check free-hand local FK stability across a full idle cycle and
+    # ensure the carrying layer does not replace the aiming arm.
+    animator.play(idle)
+    animator.advance(0.0)
+    var idle_wrist_max := 0.0
+    var idle_overlap := 0.0
+    for frame in range(120):
+        animator.advance(1.0 / 60.0)
+        retargeter.apply_pose()
+        natural_gait.keep_arms_clear(1.0 / 60.0, 0.0, false)
+        if frame >= 60:
+            for side in ["left", "right"]:
+                var hand: int = retargeter.target_keys[side + "Hand"]
+                var neutral: Quaternion = natural_gait.arm_neutral[hand]
+                idle_wrist_max = maxf(idle_wrist_max, rad_to_deg(neutral.angle_to(retargeter.target.get_bone_pose_rotation(hand))))
+                idle_overlap = maxf(idle_overlap, natural_gait.hand_penetration(side, float(natural_gait.arm_sides[side])))
+    print("FK_IDLE wrist_deviation=", idle_wrist_max, " clearance_overlap=", idle_overlap)
+    if idle_wrist_max > 12.1:
+        push_error("Idle wrist exceeded local retarget limit")
+        get_tree().quit(1)
+        return
+    var right_arm: int = retargeter.target_keys["rightUpperArm"]
+    var right_before := retargeter.target.get_bone_pose_rotation(right_arm)
+    natural_gait.keep_arms_clear(1.0 / 60.0, 0.0, true)
+    if right_before.angle_to(retargeter.target.get_bone_pose_rotation(right_arm)) > 0.001:
+        push_error("Free-arm layer modified carrying arm")
+        get_tree().quit(1)
+        return
     print("DIRECTIONAL_SMOKE_PASS")
     var prop_wait := 0
     while not household.placement_complete and prop_wait < 120:
