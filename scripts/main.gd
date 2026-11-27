@@ -987,6 +987,8 @@ func _smoke() -> void:
     for frame in range(120):
         animator.advance(animator.get_animation(walk).length / 60.0)
         retargeter.apply_pose()
+        # Match the gameplay pose pipeline and the clip preparation.
+        natural_gait.limit_torso(1.0)
         natural_gait.keep_arms_clear(1.0 / 60.0, SPEED, false, "walk", animator.current_animation_position / animator.get_animation(walk).length)
         if frame >= 60:
             for side in ["left", "right"]:
@@ -1020,6 +1022,7 @@ func _smoke() -> void:
     for frame in range(120):
         animator.advance(1.0 / 60.0)
         retargeter.apply_pose()
+        natural_gait.limit_torso(0.0)
         natural_gait.keep_arms_clear(1.0 / 60.0, 0.0, false, "idle", animator.current_animation_position / animator.get_animation(idle).length)
         if frame >= 60:
             for side in ["left", "right"]:

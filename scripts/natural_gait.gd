@@ -295,7 +295,9 @@ func prepare_arm_clip(state: String, ap: AnimationPlayer, clip: StringName, dono
             # live animation graph. Record the minimal extra abduction.
             var applied := 0.0
             for iteration in range(8):
-                var overlap := hand_penetration(side, sign_side)
+                # Small preparation-only safety margin for interpolation
+                # between samples and changes in torso blend.
+                var overlap := hand_penetration(side, sign_side, 0.010)
                 if overlap <= 0.001 or applied >= deg_to_rad(32.0):
                     break
                 var step := minf(deg_to_rad(32.0) - applied, clampf(overlap / 0.45, deg_to_rad(0.5), deg_to_rad(7.0)))
@@ -407,10 +409,10 @@ func hand_points(side: String) -> Array[Vector3]:
         result.append(at + (at - from).normalized() * 0.12)
     return result
 
-func hand_penetration(side: String, sign_side: float) -> float:
+func hand_penetration(side: String, sign_side: float, extra_margin: float = 0.0) -> float:
     var hips: int = rig.target_keys["hips"]
     var pelvis := visual.to_local(skeleton.to_global(skeleton.get_bone_global_pose(hips).origin))
-    var width := maxf(skirt_half_width, measured_skirt_width) + 0.035
+    var width := maxf(skirt_half_width, measured_skirt_width) + 0.035 + extra_margin
     var correction := 0.0
     for point in hand_points(side):
         var p := point - pelvis
