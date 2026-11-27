@@ -12,6 +12,13 @@ var skirt_half_width := 0.0
 const HAND_MARGIN := 0.012
 const MAX_COMPRESSION := 0.065
 var skirt_samples: Array[Dictionary] = []
+var torso_samples: Array[Dictionary] = []
+var torso_residual: Dictionary = {"left": 0.0, "right": 0.0}
+var forearm_residual: Dictionary = {"left": 0.0, "right": 0.0}
+var last_torso_overlap := 0.0
+const UPPER_ARM_RADIUS := 0.035
+const FOREARM_RADIUS := 0.030
+const BODY_MARGIN := 0.008
 var skirt_sample_bones: Dictionary = {}
 var skirt_rest_positions: Dictionary = {}
 var skirt_compression: Dictionary = {"left": 0.0, "right": 0.0}
@@ -37,14 +44,21 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
     for bone in groups["SKIRT"]:
         skirt_rest_positions[bone] = skeleton.get_bone_rest(bone).origin
     cache_skirt_surface(avatar)
-    print("SECONDARY_COLLISION hair=", groups["HAIR"].size(), " skirt=", groups["SKIRT"].size(), " skirt_width=", skirt_half_width, " surface_samples=", skirt_samples.size())
+    print("SECONDARY_COLLISION hair=", groups["HAIR"].size(), " skirt=", groups["SKIRT"].size(), " skirt_width=", skirt_half_width, " surface_samples=", skirt_samples.size(), " torso_samples=", torso_samples.size())
 
 # Cache a spatially decimated set of actual skin-weighted fabric
 # vertices, including their influences on pelvis and skirt bones.
 # Rest-to-pose transforms then follow the live deforming skirt.
 func cache_skirt_surface(avatar: Node3D) -> void:
     var occupied: Dictionary = {}
+    var torso_occupied: Dictionary = {}
+    var torso_bones: Array[int] = []
+    for key in ["hips", "spine", "chest", "upperChest"]:
+        if rig.target_keys.has(key):
+            torso_bones.append(int(rig.target_keys[key]))
     var pelvis := common_rest(int(rig.target_keys["hips"]))
+    var shoulder_y := (common_rest(int(rig.target_keys["leftUpperArm"])).y + common_rest(int(rig.target_keys["rightUpperArm"])).y) * 0.5 - pelvis.y
+    var shoulder_width := absf(common_rest(int(rig.target_keys["leftUpperArm"])).x - common_rest(int(rig.target_keys["rightUpperArm"])).x) * 0.5
     for node in avatar.find_children("*", "MeshInstance3D", true, false):
         var mesh_node := node as MeshInstance3D
         var skin := mesh_node.skin
@@ -70,6 +84,7 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                 var ids: Array[int] = []
                 var amounts: Array[float] = []
                 var influence := 0.0
+                var torso_influence := 0.0
                 var total := 0.0
                 for j in range(stride):
                     var bind := bones[i * stride + j]
@@ -82,28 +97,40 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                     total += weight
                     if groups["SKIRT"].has(bone):
                         influence += weight
-                if influence < 0.25 or total < 0.001:
+                    if torso_bones.has(bone):
+                        torso_influence += weight
+                if total < 0.001 or (influence < 0.25 and torso_influence < 0.65):
                     continue
                 var local := skeleton.to_local(mesh_node.to_global(vertices[i]))
                 var p: Vector3 = rig.target_basis * local * float(rig.target_scale) - pelvis
-                if absf(p.x) > 0.45 or absf(p.z) > 0.40 or p.y > 0.20 or p.y < -0.65:
-                    continue
                 var cell := Vector3i(roundi(p.x / 0.018), roundi(p.y / 0.018), roundi(p.z / 0.018))
-                if occupied.has(cell):
+                var garment := influence >= 0.25 and absf(p.x) <= 0.45 and absf(p.z) <= 0.40 and p.y <= 0.20 and p.y >= -0.65
+                var body := torso_influence >= 0.65 and influence < 0.10 and absf(p.x) <= shoulder_width + 0.025 and absf(p.z) <= 0.30 and p.y >= -0.08 and p.y <= shoulder_y + 0.015
+                var add_skirt := garment and not occupied.has(cell)
+                var add_torso := body and not torso_occupied.has(cell)
+                if not add_skirt and not add_torso:
                     continue
-                occupied[cell] = true
                 for bone in ids:
                     skirt_sample_bones[bone] = skeleton.get_bone_global_rest(bone).affine_inverse()
-                skirt_samples.append({"point": local, "ids": ids, "weights": amounts, "total": total})
+                var sample := {"point": local, "ids": ids, "weights": amounts, "total": total}
+                if add_skirt:
+                    occupied[cell] = true
+                    skirt_samples.append(sample)
+                if add_torso:
+                    torso_occupied[cell] = true
+                    torso_samples.append(sample)
 
 func skirt_surface() -> PackedVector3Array:
+    return skinned_surface(skirt_samples)
+
+func skinned_surface(samples: Array[Dictionary]) -> PackedVector3Array:
     var result := PackedVector3Array()
     var transforms: Dictionary = {}
     var to_visual := visual.global_transform.affine_inverse() * skeleton.global_transform
     for bone in skirt_sample_bones:
         var inverse_rest: Transform3D = skirt_sample_bones[bone]
         transforms[bone] = to_visual * skeleton.get_bone_global_pose(bone) * inverse_rest
-    for sample in skirt_samples:
+    for sample in samples:
         var p: Vector3 = sample["point"]
         var ids: Array = sample["ids"]
         var weights: Array = sample["weights"]
@@ -113,6 +140,77 @@ func skirt_surface() -> PackedVector3Array:
             pos += (transform * p) * float(weights[i])
         result.append(pos / float(sample["total"]))
     return result
+
+# Sample the fleshy part of the arm, not the shoulder joint which is
+# intentionally embedded in the body. Test each capsule cross section
+# against the measured side of the torso at the same height and depth.
+func arm_body_overlap(side: String, sign_side: float, surface: PackedVector3Array, forearm: bool) -> float:
+    var a := at(side + ("LowerArm" if forearm else "UpperArm"))
+    var b := at(side + ("Hand" if forearm else "LowerArm"))
+    var radius := (FOREARM_RADIUS if forearm else UPPER_ARM_RADIUS) + BODY_MARGIN
+    var center := at("hips")
+    var overlap := 0.0
+    var fractions := [0.0, 0.20, 0.40, 0.60, 0.80, 1.0] if forearm else [0.52, 0.68, 0.84, 1.0]
+    for fraction in fractions:
+        var p := a.lerp(b, float(fraction))
+        for cloth in surface:
+            if (cloth.x - center.x) * sign_side < 0.0:
+                continue
+            var dy := absf(p.y - cloth.y)
+            var dz := absf(p.z - cloth.z)
+            # Allow for the 18 mm sampling grid while retaining a curved
+            # capsule cross section rather than a full bounding box.
+            var cross_distance := Vector2(maxf(0.0, dy - 0.010), maxf(0.0, dz - 0.010)).length()
+            if cross_distance >= radius:
+                continue
+            var lateral := sqrt(maxf(0.0, radius * radius - cross_distance * cross_distance))
+            overlap = maxf(overlap, (cloth.x - p.x) * sign_side + lateral)
+    return overlap
+
+func rotate_forearm(side: String, sign_side: float, angle: float) -> void:
+    if angle <= 0.00001:
+        return
+    var bone: int = rig.target_keys[side + "LowerArm"]
+    var hand: int = rig.target_keys[side + "Hand"]
+    var common: Basis = rig.target_basis
+    var axis := skeleton.get_bone_global_pose(hand).origin - skeleton.get_bone_global_pose(bone).origin
+    var rotation := common.inverse() * Basis(Vector3.BACK, sign_side * angle) * common
+    rig.aim_arm_bone(bone, hand, rotation * axis, 1.0)
+
+func solve_arm_torso(delta: float, gait: RefCounted, holding: bool) -> void:
+    if torso_samples.is_empty():
+        return
+    var surface := skinned_surface(torso_samples)
+    last_torso_overlap = 0.0
+    for side in ["left", "right"]:
+        if holding and side == "right":
+            torso_residual[side] = 0.0
+            forearm_residual[side] = 0.0
+            continue
+        var sign_side: float = gait.arm_sides[side]
+        # First clear the elbow/upper arm, then clear the forearm
+        # independently. This minimizes whole-arm abduction.
+        var shoulder_offset := maxf(0.0, float(torso_residual[side]) - delta * deg_to_rad(55.0))
+        gait.abduct_chain(side, sign_side, shoulder_offset)
+        for iteration in range(7):
+            var overlap := arm_body_overlap(side, sign_side, surface, false)
+            if overlap <= 0.001 or shoulder_offset >= deg_to_rad(28.0):
+                break
+            var step := minf(deg_to_rad(28.0) - shoulder_offset, clampf(overlap / 0.22, deg_to_rad(0.4), deg_to_rad(7.0)))
+            gait.abduct_chain(side, sign_side, step)
+            shoulder_offset += step
+        torso_residual[side] = shoulder_offset
+        var elbow_offset := maxf(0.0, float(forearm_residual[side]) - delta * deg_to_rad(55.0))
+        rotate_forearm(side, sign_side, elbow_offset)
+        for iteration in range(6):
+            var overlap := arm_body_overlap(side, sign_side, surface, true)
+            if overlap <= 0.001 or elbow_offset >= deg_to_rad(20.0):
+                break
+            var step := minf(deg_to_rad(20.0) - elbow_offset, clampf(overlap / 0.23, deg_to_rad(0.4), deg_to_rad(6.0)))
+            rotate_forearm(side, sign_side, step)
+            elbow_offset += step
+        forearm_residual[side] = elbow_offset
+        last_torso_overlap = maxf(last_torso_overlap, maxf(arm_body_overlap(side, sign_side, surface, false), arm_body_overlap(side, sign_side, surface, true)))
 
 # Only compare against the local fabric patch next to each finger.
 # A whole-skirt bounding box would falsely report contact at the waist
@@ -269,6 +367,8 @@ func tick(delta: float, gait: RefCounted = null, holding: bool = false) -> void:
         var previous: Quaternion = last_pose[i]
         skeleton.set_bone_pose_rotation(i, previous.slerp(rest, 1.0 - exp(-delta * 12.0)))
     skeleton.force_update_all_bone_transforms()
+    if gait != null:
+        solve_arm_torso(delta, gait, holding)
     for kind in groups:
         var volumes := colliders(str(kind))
         # Hand/cloth contact is handled by the skinned-surface solver
