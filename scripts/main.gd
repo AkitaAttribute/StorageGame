@@ -11,6 +11,8 @@ const NaturalGait = preload("res://scripts/natural_gait.gd")
 const SecondaryCollision = preload("res://scripts/secondary_collision.gd")
 const DIRECTIONAL_CHARACTER := "res://assets/directional_walk.glb"
 const SPEED := 3.4
+const TRAVEL_TURN_RATE := deg_to_rad(420.0)
+const TRAVEL_TURN_RESPONSE := 12.0
 const ROLLUP_SCENE = preload("res://scenes/rollup_unit.tscn")
 const CHARACTER_HEIGHT := 1.7
 const PLAYER_CAPSULE_HEIGHT := 1.65
@@ -639,13 +641,14 @@ func _physics_process(delta: float) -> void:
     if not is_instance_valid(player):
         return
     var input := Input.get_vector("move_left", "move_right", "move_up", "move_down")
-    # Sideways input normally turns the body and becomes a forward walk.
-    # Rearward input keeps the successful dedicated backpedal behavior.
-    var backpedal := is_backpedal(input)
-    var speed_factor := 1.0
-    if backpedal:
-        speed_factor = lerpf(1.0, 0.58, input.y)
-    var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw) * speed_factor
+    var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw)
+    # All joystick headings use the same shortest-arc turn. Ease translation
+    # while making a large turn so the feet do not slide backward.
+    if direction.length() > 0.05 and not (is_instance_valid(household) and is_instance_valid(household.held)):
+        var target_yaw := travel_yaw(direction)
+        var turn_error := absf(angle_difference(visual.rotation.y, target_yaw))
+        var alignment := clampf(cos(turn_error), 0.0, 1.0)
+        direction *= lerpf(0.48, 1.0, alignment)
     if is_instance_valid(rollup_unit):
         direction = rollup_unit.filter_player_motion(player, direction, PLAYER_CAPSULE_HEIGHT, PLAYER_CAPSULE_RADIUS)
     var grounded := player.is_on_floor() or stepped_last_frame
@@ -687,10 +690,7 @@ func _physics_process(delta: float) -> void:
         if facing.length_squared() > 0.01:
             visual.rotation.y = rotate_toward(visual.rotation.y, atan2(facing.x, facing.z), deg_to_rad(420.0) * delta)
     elif direction.length() > 0.05:
-        # Turn hips and shoulders into normal travel immediately. Only
-        # intentional backward motion keeps facing camera-forward.
-        var facing_yaw := travel_yaw(direction, backpedal)
-        visual.rotation.y = rotate_toward(visual.rotation.y, facing_yaw, deg_to_rad(780.0) * delta)
+        visual.rotation.y = smooth_travel_turn(visual.rotation.y, travel_yaw(direction), delta)
     if animator != null:
         var displacement := player.position - previous_position
         var ground_speed := Vector2(displacement.x, displacement.z).length() / maxf(delta, 0.001)
@@ -702,7 +702,7 @@ func _physics_process(delta: float) -> void:
             if moving and not holding_direction:
                 # Choose the requested gait at input change, not after the
                 # character completes its turn. Preserve phase across clips.
-                requested_suffix = gait_suffix(Basis(Vector3.UP, camera_yaw + PI).inverse() * direction) if backpedal else "fwd"
+                requested_suffix = "fwd"
             animate_directional(delta, animation_velocity, moving, requested_suffix)
             if natural_gait != null and natural_gait.ready:
                 var holding_prop := is_instance_valid(household) and is_instance_valid(household.held)
@@ -744,11 +744,13 @@ func gait_suffix(local_velocity: Vector3) -> String:
     var sector := posmod(roundi(heading / (PI / 4.0)), 8)
     return ["fwd", "fwd_l", "l", "bwd_l", "bwd", "bwd_r", "r", "fwd_r"][sector]
 
-func is_backpedal(input: Vector2) -> bool:
-    return input.y > 0.35 and input.y >= absf(input.x) * 0.80
+func travel_yaw(direction: Vector3) -> float:
+    return atan2(direction.x, direction.z)
 
-func travel_yaw(direction: Vector3, backpedal: bool) -> float:
-    return camera_yaw + PI if backpedal else atan2(direction.x, direction.z)
+func smooth_travel_turn(current: float, target: float, delta: float) -> float:
+    var error := angle_difference(current, target)
+    var step := clampf(error * (1.0 - exp(-delta * TRAVEL_TURN_RESPONSE)), -TRAVEL_TURN_RATE * delta, TRAVEL_TURN_RATE * delta)
+    return wrapf(current + step, -PI, PI)
 
 func animate_directional(delta: float, velocity: Vector3, moving: bool, requested_suffix: String = "") -> void:
     var suffix := gait_suffix(visual.global_transform.basis.inverse() * velocity) if moving else ""
@@ -922,12 +924,39 @@ func _smoke() -> void:
         push_error("Directional locomotion retarget regression")
         get_tree().quit(1)
         return
-    # Normal lateral travel turns the hips into the new heading, while
-    # deliberate rearward input retains the authored backward walk.
-    if is_backpedal(Vector2.RIGHT) or not is_backpedal(Vector2.DOWN) or absf(angle_difference(travel_yaw(Vector3.RIGHT, false), PI * 0.5)) > 0.001 or absf(angle_difference(travel_yaw(Vector3.BACK, true), camera_yaw + PI)) > 0.001:
-        push_error("Direction-change facing regression")
+    # Every heading, including directly behind the player, turns by the
+    # shorter arc without the old rear-sector discontinuity.
+    var turn := smooth_travel_turn(deg_to_rad(179.0), deg_to_rad(-179.0), 1.0 / 60.0)
+    var turn_step := angle_difference(deg_to_rad(179.0), turn)
+    if turn_step <= 0.0 or turn_step > deg_to_rad(2.0) or absf(angle_difference(travel_yaw(Vector3.RIGHT), PI * 0.5)) > 0.001 or absf(angle_difference(travel_yaw(Vector3.BACK), 0.0)) > 0.001 or absf(angle_difference(travel_yaw(Vector3.FORWARD), PI)) > 0.001:
+        push_error("Shortest-arc travel turning regression")
         get_tree().quit(1)
         return
+    # Sample the actual forward clip after the arm constraint. Both arms
+    # must retain visible sagittal motion instead of a static A-pose.
+    animator.play(walk)
+    animator.advance(0.0)
+    var arm_min := {"left": INF, "right": INF}
+    var arm_max := {"left": -INF, "right": -INF}
+    for frame in range(120):
+        animator.advance(animator.get_animation(walk).length / 60.0)
+        retargeter.apply_pose()
+        natural_gait.keep_arms_clear(1.0 / 60.0, SPEED, false)
+        if frame >= 60:
+            for side in ["left", "right"]:
+                var arm: int = retargeter.target_keys[side + "UpperArm"]
+                var elbow: int = retargeter.target_keys[side + "LowerArm"]
+                var axis := retargeter.target_basis * (retargeter.target.get_bone_global_pose(elbow).origin - retargeter.target.get_bone_global_pose(arm).origin)
+                var swing := atan2(axis.z, -axis.y)
+                arm_min[side] = minf(float(arm_min[side]), swing)
+                arm_max[side] = maxf(float(arm_max[side]), swing)
+    for side in ["left", "right"]:
+        var range_degrees := rad_to_deg(float(arm_max[side]) - float(arm_min[side]))
+        print("ARM_SWING ", side, " degrees=", range_degrees)
+        if range_degrees < 12.0:
+            push_error("Arm motion is too stiff: " + side)
+            get_tree().quit(1)
+            return
     print("DIRECTIONAL_SMOKE_PASS")
     var prop_wait := 0
     while not household.placement_complete and prop_wait < 120:

@@ -15,6 +15,14 @@ var last_facing := Vector3.FORWARD
 var last_root := Vector3.ZERO
 var pelvis_offset := 0.0
 var skirt_half_width := 0.20
+# Presentation defaults for Shino, not population-wide anatomical limits.
+const ARM_IDLE_ABDUCTION := 12.0
+const ARM_SWING_ABDUCTION := 10.0
+const ARM_MAX_SWING := 23.0
+const ARM_RESPONSE := 18.0
+var arm_angles: Dictionary = {"left": 0.0, "right": 0.0}
+var elbow_angles: Dictionary = {"left": 9.0, "right": 9.0}
+var arm_activity := 0.0
 
 func setup(retargeter: RefCounted, body: CharacterBody3D, visual_root: Node3D, avatar_root: Node3D, rest_y: float) -> void:
     rig = retargeter
@@ -43,7 +51,7 @@ func set_global_rotation(bone: int, desired: Basis, blend: float) -> void:
     skeleton.set_bone_pose_rotation(bone, original.slerp(desired.orthonormalized().get_rotation_quaternion(), blend))
     skeleton.force_update_all_bone_transforms()
 
-func limit_torso() -> void:
+func limit_torso(activity: float) -> void:
     # Keep the base clip's subtle rotation but prevent a running-style bend.
     for key in ["hips", "spine", "chest", "upperChest", "neck", "head"]:
         if not rig.target_keys.has(key):
@@ -59,17 +67,29 @@ func limit_torso() -> void:
         var maximum := deg_to_rad(5.0 if key == "hips" else 8.0)
         euler.x = clampf(euler.x, -maximum, maximum)
         euler.z = clampf(euler.z, -maximum, maximum)
-        euler.y = clampf(euler.y, -deg_to_rad(18.0), deg_to_rad(18.0))
+        # Preserve and modestly enhance authored transverse rotation.
+        # Do not exaggerate forward lean or add artificial hip sway.
+        var yaw_gain := 1.0 + activity * (0.12 if key in ["hips", "spine", "chest", "upperChest"] else 0.0)
+        euler.y = clampf(euler.y * yaw_gain, -deg_to_rad(20.0), deg_to_rad(20.0))
         set_global_rotation(bone, common.inverse() * Basis.from_euler(euler) * common * rest, 1.0)
 
-func keep_arms_clear(holding: bool) -> void:
+# Walking arms behave as lightly driven pendulums. Use the authored arm
+# motion and contralateral thigh phase as input, not a new stride oscillator.
+# Collins et al. 2009, Bruening et al. 2015 and 2020, and Yegian et al. 2019.
+func keep_arms_clear(delta: float, speed: float, holding: bool) -> void:
     var common: Basis = rig.target_basis
+    var activity := smoothstep(0.08, 2.5, speed)
+    arm_activity = lerpf(arm_activity, activity, 1.0 - exp(-delta * 10.0))
+    var response := 1.0 - exp(-delta * ARM_RESPONSE)
     for side in ["left", "right"]:
         if holding and side == "right":
             continue
         var upper: int = rig.target_keys[side + "UpperArm"]
         var lower: int = rig.target_keys[side + "LowerArm"]
         var hand: int = rig.target_keys[side + "Hand"]
+        var other := "right" if side == "left" else "left"
+        var thigh: int = rig.target_keys[other + "UpperLeg"]
+        var shin: int = rig.target_keys[other + "LowerLeg"]
         var shoulder := skeleton.get_bone_global_pose(upper).origin
         var elbow := skeleton.get_bone_global_pose(lower).origin
         var wrist := skeleton.get_bone_global_pose(hand).origin
@@ -77,20 +97,34 @@ func keep_arms_clear(holding: bool) -> void:
         var sign_side := signf((common * rest_axis).x)
         if is_zero_approx(sign_side):
             sign_side = 1.0 if side == "left" else -1.0
-        # Preserve the authored forward/back swing, with outward clearance
-        # for this character's skirt and a limited, relaxed elbow bend.
-        var u := (common * (elbow - shoulder)).normalized()
-        var v := (common * (wrist - elbow)).normalized()
-        # Retain the authored sagittal swing and elbow flexion. At rest the
-        # arms hang almost vertically; clearance is a correction, not a pose.
-        var upper_z := clampf(u.z / maxf(absf(u.y), 0.40), -0.48, 0.48)
-        var lower_z := clampf(v.z / maxf(absf(v.y), 0.35), upper_z - 0.14, upper_z + 0.45)
-        var upper_dir := Vector3(sign_side * 0.09, -1.0, upper_z).normalized()
-        var lower_dir := Vector3(sign_side * 0.04, -1.0, lower_z).normalized()
+        var authored_upper := (common * (elbow - shoulder)).normalized()
+        var authored_forearm := (common * (wrist - elbow)).normalized()
+        var opposite_leg := (common * (skeleton.get_bone_global_pose(shin).origin - skeleton.get_bone_global_pose(thigh).origin)).normalized()
+        var leg_angle := atan2(opposite_leg.z, maxf(0.25, -opposite_leg.y))
+        var authored_angle := atan2(authored_upper.z, maxf(0.25, -authored_upper.y))
+        # Preserve the sign and phase of actual leg motion, even if donor
+        # shoulder movement is too small. No forced swing when stationary.
+        var desired := clampf(lerpf(authored_angle * 1.25, leg_angle * 0.90, 0.60), -deg_to_rad(ARM_MAX_SWING), deg_to_rad(ARM_MAX_SWING)) * arm_activity
+        var swing := lerpf(float(arm_angles[side]), desired, response)
+        arm_angles[side] = swing
+        var authored_bend := rad_to_deg(authored_upper.angle_to(authored_forearm))
+        var flex := lerpf(9.0, clampf(authored_bend * 0.65 + 5.0, 7.0, 25.0), arm_activity)
+        flex += maxf(0.0, sin(swing)) * 10.0 * arm_activity
+        var elbow_flex := lerpf(float(elbow_angles[side]), flex, response)
+        elbow_angles[side] = elbow_flex
+        var abduct := deg_to_rad(lerpf(ARM_IDLE_ABDUCTION, ARM_SWING_ABDUCTION, arm_activity))
+        # Slight lateral freedom at the shoulder; forearm falls closer to
+        # vertical, not a rigid continuation of the shoulder's angle.
+        var lateral := sign_side * sin(abduct)
+        var upper_dir := Vector3(lateral, -cos(abduct) * cos(swing), cos(abduct) * sin(swing)).normalized()
+        var fore_angle := swing + deg_to_rad(elbow_flex)
+        var lower_dir := Vector3(lateral * 0.45, -cos(fore_angle), sin(fore_angle)).normalized()
         rig.aim_arm_bone(upper, lower, common.inverse() * upper_dir, 1.0)
         rig.aim_arm_bone(lower, hand, common.inverse() * lower_dir, 1.0)
-        # Neutral local wrist rather than a donor wrist rotated into the skirt.
-        skeleton.set_bone_pose_rotation(hand, skeleton.get_bone_rest(hand).basis.get_rotation_quaternion())
+        # Keep a relaxed wrist, but retain some authored wrist articulation.
+        var rest_hand := skeleton.get_bone_rest(hand).basis.get_rotation_quaternion()
+        var posed_hand := skeleton.get_bone_pose_rotation(hand)
+        skeleton.set_bone_pose_rotation(hand, rest_hand.slerp(posed_hand, 0.30 * arm_activity))
         skeleton.force_update_all_bone_transforms()
         constrain_hand(side, sign_side)
 
@@ -158,7 +192,7 @@ func constrain_hand(side: String, sign_side: float) -> void:
     rig.aim_arm_bone(upper, lower, knee - shoulder, 1.0)
     var new_elbow := skeleton.get_bone_global_pose(lower).origin
     rig.aim_arm_bone(lower, hand, shoulder + axis * distance - new_elbow, 1.0)
-    skeleton.set_bone_pose_rotation(hand, skeleton.get_bone_rest(hand).basis.get_rotation_quaternion())
+    # The contact correction moves the arm chain, not the hand pose.
     skeleton.force_update_all_bone_transforms()
 
 func ground_at(point: Vector3) -> Dictionary:
@@ -248,7 +282,7 @@ func contact_step(side: String, delta: float, turning: bool, grounded: bool) -> 
         terrain_target.y = minf(terrain_target.y, animated.y + 0.10)
         solve_leg(side, terrain_target, 0.55)
 
-func tick(delta: float, _velocity: Vector3, grounded: bool, holding: bool) -> void:
+func tick(delta: float, velocity: Vector3, grounded: bool, holding: bool) -> void:
     if not ready:
         return
     var facing := visual.global_transform.basis.z.normalized()
@@ -256,8 +290,9 @@ func tick(delta: float, _velocity: Vector3, grounded: bool, holding: bool) -> vo
     var turning := angular_speed > deg_to_rad(85.0) or player.global_position.distance_to(last_root) > 0.35
     last_facing = facing
     last_root = player.global_position
-    limit_torso()
-    keep_arms_clear(holding)
+    var speed := Vector2(velocity.x, velocity.z).length()
+    limit_torso(smoothstep(0.08, 2.5, speed))
+    keep_arms_clear(delta, speed, holding)
     var correction := clampf(float(rig.foot_ground_correction()), -0.065, 0.065) if grounded else 0.0
     pelvis_offset = lerpf(pelvis_offset, correction, 1.0 - exp(-delta * 12.0))
     avatar.position.y = base_y + pelvis_offset
