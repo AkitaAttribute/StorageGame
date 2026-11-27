@@ -143,3 +143,6 @@ text(await tools.mcp__GitHub__update_ref({
 ## 7. Suggested first message in new chat
 
 "Continue StorageGame in AkitaAttribute/StorageGame. Read CHATGPT_README.md and current main, inspect the latest GitHub Actions failure, fix resting elbow/torso contact without restoring the A-pose. Preserve the improved walking and carrying behavior. Commit fixes to main and report the actual build status."
+
+## Follow-up to Build 49
+The next code revision corrects the torso proxy selection (exclude blended sleeve/armhole attachments), measures limb radius from arm-weighted mesh vertices, assigns elbow clearance to the upper arm rather than testing an immovable pivot twice, uses measured correction leverage, and measures torso clearance after the final skirt contact pass. The 8 mm torso and 25 mm skirt regression limits remain unchanged. The idle baseline has a slight elbow-back bias. Verify the next workflow and actual front/side pose before considering the visual issue fixed.

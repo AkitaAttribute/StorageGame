@@ -1041,6 +1041,11 @@ func _smoke() -> void:
                 var axis := retargeter.target_basis * (retargeter.target.get_bone_global_pose(lower).origin - retargeter.target.get_bone_global_pose(upper).origin)
                 idle_abduction = maxf(idle_abduction, rad_to_deg(atan2(absf(axis.x), maxf(0.001, -axis.y))))
     print("FK_IDLE wrist_deviation=", idle_wrist_max, " deformed_clearance_overlap=", idle_overlap, " skirt_compression=", idle_compression, " abduction=", idle_abduction, " torso_overlap=", idle_torso_overlap)
+    for key in secondary_collision.arm_radius_counts:
+        if int(secondary_collision.arm_radius_counts[key]) < 5:
+            push_error("Insufficient mesh samples for arm thickness: " + str(key))
+            get_tree().quit(1)
+            return
     if secondary_collision.torso_samples.is_empty() or idle_torso_overlap > 0.008:
         push_error("Resting arm intersects torso collision surface")
         get_tree().quit(1)
