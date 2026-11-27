@@ -20,6 +20,7 @@ var skirt_half_width := 0.20
 # pose is not the model's T-pose or a world-space wrist target.
 var arm_reference: Dictionary = {}
 var arm_neutral: Dictionary = {}
+var idle_neutral: Dictionary = {}
 var arm_previous: Dictionary = {}
 var arm_clips: Dictionary = {}
 var arm_transition_from: Dictionary = {}
@@ -222,6 +223,13 @@ func calibrate_arm_pose() -> void:
         for bone in [upper, lower, hand]:
             arm_neutral[bone] = skeleton.get_bone_pose_rotation(bone)
             arm_previous[bone] = arm_neutral[bone]
+        # A separate relaxed idle pose: elbows hang near the ribs and
+        # hands rest against the skirt rather than clearing its widest hem.
+        rig.aim_arm_bone(upper, lower, common.inverse() * Vector3(sign_side * 0.075, -1.0, -0.025), 1.0)
+        rig.aim_arm_bone(lower, hand, common.inverse() * Vector3(sign_side * 0.05, -1.0, 0.13), 1.0)
+        stabilize_hand(side, sign_side)
+        for bone in [upper, lower, hand]:
+            idle_neutral[bone] = skeleton.get_bone_pose_rotation(bone)
         # Do not leave the calibration applied to the donor animation.
         for bone in [upper, lower, hand]:
             skeleton.set_bone_pose_rotation(bone, arm_reference[bone])
@@ -277,7 +285,7 @@ func prepare_arm_clip(state: String, ap: AnimationPlayer, clip: StringName, dono
                 var bone: int = rig.target_keys[side + suffix]
                 var mean: Quaternion = means[bone]
                 var source_pose: Quaternion = raw[i][bone]
-                var neutral: Quaternion = arm_neutral[bone]
+                var neutral: Quaternion = arm_neutral[bone] if moving else idle_neutral[bone]
                 var motion := (mean.inverse() * source_pose).normalized()
                 # Idle retains the small authored weight shifts and
                 # breathing. Walking retains the donor's arm swing and
@@ -294,7 +302,7 @@ func prepare_arm_clip(state: String, ap: AnimationPlayer, clip: StringName, dono
             # Solve garment clearance on prepared keyframes, not in the
             # live animation graph. Record the minimal extra abduction.
             var applied := 0.0
-            for iteration in range(8):
+            for iteration in range(8 if moving else 0):
                 # Small preparation-only safety margin for interpolation
                 # between samples and changes in torso blend.
                 var overlap := hand_penetration(side, sign_side, 0.010)
@@ -330,7 +338,7 @@ func prepare_arm_clip(state: String, ap: AnimationPlayer, clip: StringName, dono
             output[bone] = skeleton.get_bone_pose_rotation(bone)
         baked.append(output)
     arm_clips[state] = baked
-    print("ARM_CLIP ", state, " samples=", baked.size(), " clearance_overlap=", max_overlap)
+    print("ARM_CLIP ", state, " samples=", baked.size(), " undeformed_skirt_overlap=", max_overlap)
 
 func clip_arm_pose(state: String, phase: float, bone: int) -> Quaternion:
     if not arm_clips.has(state):

@@ -275,7 +275,7 @@ func start_game(data: Dictionary) -> void:
         natural_gait = NaturalGait.new()
         natural_gait.setup(retargeter, player, visual, avatar_model, avatar_base_y)
         secondary_collision = SecondaryCollision.new()
-        secondary_collision.setup(retargeter, visual)
+        secondary_collision.setup(retargeter, visual, avatar_model)
         natural_gait.skirt_half_width = secondary_collision.skirt_half_width
         var directional_donor := model(DIRECTIONAL_CHARACTER, visual)
         directional_donor.visible = false
@@ -763,7 +763,7 @@ func _physics_process(delta: float) -> void:
         if avatar_ready and force_pose_weight > 0.0:
             retargeter.apply_force_pose(force_target, force_pose_weight)
     if secondary_collision != null:
-        secondary_collision.tick(delta)
+        secondary_collision.tick(delta, natural_gait, is_instance_valid(household) and is_instance_valid(household.held))
     update_nearby()
     if Input.is_action_just_pressed("use"):
         use_nearby()
@@ -1019,19 +1019,27 @@ func _smoke() -> void:
     animator.advance(0.0)
     var idle_wrist_max := 0.0
     var idle_overlap := 0.0
+    var idle_compression := 0.0
+    var idle_abduction := 0.0
     for frame in range(120):
         animator.advance(1.0 / 60.0)
         retargeter.apply_pose()
         natural_gait.limit_torso(0.0)
         natural_gait.keep_arms_clear(1.0 / 60.0, 0.0, false, "idle", animator.current_animation_position / animator.get_animation(idle).length)
+        secondary_collision.tick(1.0 / 60.0, natural_gait, false)
         if frame >= 60:
+            idle_compression = maxf(idle_compression, secondary_collision.last_contact_compression)
+            idle_overlap = maxf(idle_overlap, secondary_collision.last_contact_overlap)
             for side in ["left", "right"]:
                 var hand: int = retargeter.target_keys[side + "Hand"]
-                var neutral: Quaternion = natural_gait.arm_neutral[hand]
+                var neutral: Quaternion = natural_gait.idle_neutral[hand]
                 idle_wrist_max = maxf(idle_wrist_max, rad_to_deg(neutral.angle_to(retargeter.target.get_bone_pose_rotation(hand))))
-                idle_overlap = maxf(idle_overlap, natural_gait.hand_penetration(side, float(natural_gait.arm_sides[side])))
-    print("FK_IDLE wrist_deviation=", idle_wrist_max, " clearance_overlap=", idle_overlap)
-    if natural_gait.arm_clips.size() != 3 or idle_overlap > 0.025:
+                var upper: int = retargeter.target_keys[side + "UpperArm"]
+                var lower: int = retargeter.target_keys[side + "LowerArm"]
+                var axis := retargeter.target_basis * (retargeter.target.get_bone_global_pose(lower).origin - retargeter.target.get_bone_global_pose(upper).origin)
+                idle_abduction = maxf(idle_abduction, rad_to_deg(atan2(absf(axis.x), maxf(0.001, -axis.y))))
+    print("FK_IDLE wrist_deviation=", idle_wrist_max, " deformed_clearance_overlap=", idle_overlap, " skirt_compression=", idle_compression, " abduction=", idle_abduction)
+    if natural_gait.arm_clips.size() != 3 or secondary_collision.skirt_samples.is_empty() or idle_overlap > 0.025:
         push_error("Prepared idle arm layer missing or exceeds skirt clearance")
         get_tree().quit(1)
         return
