@@ -25,6 +25,11 @@ var arm_surface_counts: Dictionary = {}
 var arm_evaluated_counts: Dictionary = {}
 var arm_bone_keys: Dictionary = {}
 var torso_grid: Dictionary = {}
+var torso_triangle_vertices: Array[Dictionary] = []
+var torso_triangles: Array[Vector3i] = []
+var torso_triangle_grid: Dictionary = {}
+var live_torso_vertices := PackedVector3Array()
+var shoulder_pitch: Dictionary = {"left": 0.0, "right": 0.0}
 var skirt_sample_bones: Dictionary = {}
 var skirt_rest_positions: Dictionary = {}
 var skirt_compression: Dictionary = {"left": 0.0, "right": 0.0}
@@ -59,7 +64,7 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
     cache_skirt_surface(avatar)
     for key in arm_samples:
         arm_surface_counts[key] = arm_samples[key].size()
-    print("ARM_SURFACE_SAMPLES ", arm_surface_counts)
+    print("ARM_SURFACE_SAMPLES ", arm_surface_counts, " torso_triangles=", torso_triangles.size())
     print("SECONDARY_COLLISION hair=", groups["HAIR"].size(), " skirt=", groups["SKIRT"].size(), " skirt_width=", skirt_half_width, " surface_samples=", skirt_samples.size(), " torso_samples=", torso_samples.size())
 
 # Cache a spatially decimated set of actual skin-weighted fabric
@@ -97,6 +102,7 @@ func cache_skirt_surface(avatar: Node3D) -> void:
             if vertices.is_empty() or bones.is_empty() or weights.size() != bones.size():
                 continue
             var stride := int(bones.size() / vertices.size())
+            var triangle_vertex_ids: Dictionary = {}
             for i in range(vertices.size()):
                 var ids: Array[int] = []
                 var amounts: Array[float] = []
@@ -131,7 +137,10 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                 # inverse bind matrices per influence, not inverse rest
                 # transforms. Retain joint-blend weights in the sample.
                 var rendered_sample := {"ids": ids, "weights": amounts, "total": total, "bind_points": bind_points, "mesh": mesh_node}
-                if arm_weight >= 0.45:
+                # A connected armhole is not a pair of independent
+                # colliding surfaces. Retain arm-owned vertices, including
+                # the upper/lower arm transition, not torso-owned cloth.
+                if arm_weight >= 0.45 and torso_influence <= 0.15:
                     var arm_cell := Vector3i(roundi(common.x / 0.012), roundi(common.y / 0.012), roundi(common.z / 0.012))
                     var arm_id := arm_key + str(arm_cell)
                     if not arm_occupied.has(arm_id):
@@ -146,6 +155,9 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                 # torso surface; its skin is intentionally continuous with
                 # the shoulder. Keep the ribs and waist, including sides.
                 var body := torso_influence >= 0.90 and influence < 0.05 and absf(p.x) <= shoulder_width and absf(p.z) <= 0.30 and p.y >= -0.04 and p.y <= shoulder_y - 0.055
+                if body:
+                    triangle_vertex_ids[i] = torso_triangle_vertices.size()
+                    torso_triangle_vertices.append(rendered_sample)
                 var add_skirt := garment and not occupied.has(cell)
                 var add_torso := body and not torso_occupied.has(cell)
                 if not add_skirt and not add_torso:
@@ -159,6 +171,18 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                 if add_torso:
                     torso_occupied[cell] = true
                     torso_samples.append(rendered_sample)
+            # Keep the real connected triangles. No interpolation between
+            # unrelated surface points, which can overestimate body width.
+            if mesh_node.mesh.surface_get_primitive_type(surface) != Mesh.PRIMITIVE_TRIANGLES:
+                continue
+            var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX] if arrays[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+            var count := vertices.size() if indices.is_empty() else indices.size()
+            for i in range(0, count - 2, 3):
+                var a := i if indices.is_empty() else indices[i]
+                var b := i + 1 if indices.is_empty() else indices[i + 1]
+                var c := i + 2 if indices.is_empty() else indices[i + 2]
+                if triangle_vertex_ids.has(a) and triangle_vertex_ids.has(b) and triangle_vertex_ids.has(c):
+                    torso_triangles.append(Vector3i(int(triangle_vertex_ids[a]), int(triangle_vertex_ids[b]), int(triangle_vertex_ids[c])))
 
 # Godot Skeleton3D supplies the renderer with global bone pose times
 # Skin bind pose. Evaluate the same linear blend at sampled vertices.
@@ -188,6 +212,20 @@ func rendered_surface(samples: Array) -> PackedVector3Array:
 
 func refresh_torso_grid() -> void:
     torso_grid.clear()
+    torso_triangle_grid.clear()
+    live_torso_vertices = rendered_surface(torso_triangle_vertices)
+    for triangle in torso_triangles:
+        var a := live_torso_vertices[triangle.x]
+        var b := live_torso_vertices[triangle.y]
+        var c := live_torso_vertices[triangle.z]
+        var low := Vector2i(floori(minf(a.y, minf(b.y, c.y)) / BODY_CELL), floori(minf(a.z, minf(b.z, c.z)) / BODY_CELL))
+        var high := Vector2i(floori(maxf(a.y, maxf(b.y, c.y)) / BODY_CELL), floori(maxf(a.z, maxf(b.z, c.z)) / BODY_CELL))
+        for y in range(low.x, high.x + 1):
+            for z in range(low.y, high.y + 1):
+                var cell := Vector2i(y, z)
+                if not torso_triangle_grid.has(cell):
+                    torso_triangle_grid[cell] = []
+                torso_triangle_grid[cell].append(triangle)
     for point in rendered_surface(torso_samples):
         var cell := Vector2i(floori(point.y / BODY_CELL), floori(point.z / BODY_CELL))
         if not torso_grid.has(cell):
@@ -234,15 +272,41 @@ func arm_body_overlap(side: String, sign_side: float, forearm: bool) -> float:
             continue
         evaluated += 1
         var cell := Vector2i(floori(point.y / BODY_CELL), floori(point.z / BODY_CELL))
-        for dy in range(-1, 2):
-            for dz in range(-1, 2):
-                var bucket: PackedVector3Array = torso_grid.get(cell + Vector2i(dy, dz), PackedVector3Array())
-                for cloth in bucket:
-                    if (cloth.x - center.x) * sign_side < 0.0:
-                        continue
-                    if absf(point.y - cloth.y) > 0.017 or absf(point.z - cloth.z) > 0.017:
-                        continue
-                    overlap = maxf(overlap, (cloth.x - point.x) * sign_side + BODY_MARGIN)
+        var has_surface := false
+        # Cast a lateral ray through the actual skinned torso triangles.
+        # Barycentric interpolation at exactly this y/z avoids treating
+        # a wider rib section 17 mm away as the current surface.
+        for triangle in torso_triangle_grid.get(cell, []):
+            var a3 := live_torso_vertices[triangle.x]
+            var b3 := live_torso_vertices[triangle.y]
+            var c3 := live_torso_vertices[triangle.z]
+            var u := Vector2(b3.y - a3.y, b3.z - a3.z)
+            var v := Vector2(c3.y - a3.y, c3.z - a3.z)
+            var p := Vector2(point.y - a3.y, point.z - a3.z)
+            var determinant := u.cross(v)
+            if absf(determinant) < 0.00000001:
+                continue
+            var alpha := p.cross(v) / determinant
+            var beta := u.cross(p) / determinant
+            if alpha < -0.0001 or beta < -0.0001 or alpha + beta > 1.0001:
+                continue
+            var x := a3.x + alpha * (b3.x - a3.x) + beta * (c3.x - a3.x)
+            if (x - center.x) * sign_side < 0.0:
+                continue
+            has_surface = true
+            overlap = maxf(overlap, (x - point.x) * sign_side + BODY_MARGIN)
+        # The filtered torso has open sleeve/waist boundaries. Preserve
+        # contact against nearby sampled vertices at those boundaries.
+        if not has_surface:
+            for dy in range(-1, 2):
+                for dz in range(-1, 2):
+                    var bucket: PackedVector3Array = torso_grid.get(cell + Vector2i(dy, dz), PackedVector3Array())
+                    for cloth in bucket:
+                        if (cloth.x - center.x) * sign_side < 0.0:
+                            continue
+                        if Vector2(cloth.y - point.y, cloth.z - point.z).length() > 0.006:
+                            continue
+                        overlap = maxf(overlap, (cloth.x - point.x) * sign_side + BODY_MARGIN)
     arm_evaluated_counts[key] = evaluated
     return overlap
 
@@ -256,6 +320,14 @@ func rotate_forearm(side: String, sign_side: float, angle: float) -> void:
     var rotation := common.inverse() * Basis(Vector3.BACK, sign_side * angle) * common
     rig.aim_arm_bone(bone, hand, rotation * axis, 1.0)
 
+func apply_shoulder_candidate(gait: RefCounted, bone: int, base: Quaternion, sign_side: float, lateral: float, sagittal: float) -> void:
+    skeleton.set_bone_pose_rotation(bone, base)
+    skeleton.force_update_all_bone_transforms()
+    var common: Basis = rig.target_basis
+    var pose := skeleton.get_bone_global_pose(bone).basis.orthonormalized()
+    var correction := Basis(Vector3.RIGHT, sagittal) * Basis(Vector3.BACK, sign_side * lateral)
+    gait.set_global_rotation(bone, common.inverse() * correction * common * pose, 1.0)
+
 func solve_arm_torso(delta: float, gait: RefCounted, holding: bool) -> void:
     if torso_samples.is_empty():
         return
@@ -264,24 +336,42 @@ func solve_arm_torso(delta: float, gait: RefCounted, holding: bool) -> void:
     for side in ["left", "right"]:
         if holding and side == "right":
             torso_residual[side] = 0.0
+            shoulder_pitch[side] = 0.0
             forearm_residual[side] = 0.0
             continue
         var sign_side: float = gait.arm_sides[side]
-        # First clear the elbow/upper arm, then clear the forearm
-        # independently. This minimizes whole-arm abduction.
-        var shoulder_offset := maxf(0.0, float(torso_residual[side]) - delta * deg_to_rad(90.0))
-        gait.abduct_chain(side, sign_side, shoulder_offset)
-        for iteration in range(10):
-            var overlap := arm_body_overlap(side, sign_side, false)
-            if overlap <= 0.001 or shoulder_offset >= deg_to_rad(28.0):
-                break
-            # Use the actual elbow lever arm and smaller corrections
-            # near contact, rather than overshooting at every iteration.
-            var lever := maxf(0.10, at(side + "UpperArm").distance_to(at(side + "LowerArm")) * 0.65)
-            var step := minf(deg_to_rad(28.0) - shoulder_offset, clampf(overlap / lever, deg_to_rad(0.2), deg_to_rad(5.0)))
-            gait.abduct_chain(side, sign_side, step)
-            shoulder_offset += step
+        # Find a low-cost local shoulder adjustment; avoid the old
+        # purely lateral solver chasing an impossible armhole contact.
+        var bone: int = rig.target_keys[side + "UpperArm"]
+        var base := skeleton.get_bone_pose_rotation(bone)
+        var shoulder_offset := maxf(0.0, float(torso_residual[side]) - delta * deg_to_rad(35.0))
+        var pitch := move_toward(float(shoulder_pitch[side]), 0.0, delta * deg_to_rad(35.0))
+        apply_shoulder_candidate(gait, bone, base, sign_side, shoulder_offset, pitch)
+        var contact := arm_body_overlap(side, sign_side, false)
+        if contact > 0.001:
+            var best := Vector2(shoulder_offset, pitch)
+            var best_overlap := contact
+            var best_cost := 1000.0
+            # Search absolute bounded rotations. A lower-cost solution
+            # prefers the arms near the hips; sagittal motion can clear
+            # a rib without raising the elbow out into an A-pose.
+            for lateral in [0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0]:
+                for sagittal in [0.0, -8.0, 8.0, -16.0, 16.0, -24.0, 24.0]:
+                    var cost := float(lateral) * 1.5 + absf(float(sagittal))
+                    if best_overlap <= 0.001 and cost >= best_cost:
+                        continue
+                    var candidate := Vector2(deg_to_rad(float(lateral)), deg_to_rad(float(sagittal)))
+                    apply_shoulder_candidate(gait, bone, base, sign_side, candidate.x, candidate.y)
+                    var error := arm_body_overlap(side, sign_side, false)
+                    if (error <= 0.001 and (best_overlap > 0.001 or cost < best_cost)) or (best_overlap > 0.001 and error < best_overlap):
+                        best = candidate
+                        best_overlap = error
+                        best_cost = cost
+            shoulder_offset = best.x
+            pitch = best.y
+            apply_shoulder_candidate(gait, bone, base, sign_side, shoulder_offset, pitch)
         torso_residual[side] = shoulder_offset
+        shoulder_pitch[side] = pitch
         var elbow_offset := maxf(0.0, float(forearm_residual[side]) - delta * deg_to_rad(55.0))
         rotate_forearm(side, sign_side, elbow_offset)
         for iteration in range(6):

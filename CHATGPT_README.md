@@ -149,3 +149,5 @@ The next code revision corrects the torso proxy selection (exclude blended sleev
 
 ## Mandatory build verification (user directive, 2026-11-27)
 Until explicitly told otherwise, every code push must be followed through GitHub Actions to a successful build before reporting completion. If a run fails, inspect actual logs, fix the cause, push and verify the replacement run in the same conversation. Do not stop at queued/in progress. If a genuine tool/time/access blocker prevents this, disclose it and do not claim success. Build 50 failed at import because GDScript could not infer the type of key and child from Variant loop values; the next revision explicitly types these strings. Keep collision regressions intact.
+
+Build 54 had adequate live arm samples but failed the same torso test. The next revision retains connected torso mesh triangles and evaluates exact lateral surface intersections in y/z, excludes torso-owned armhole vertices, and searches bounded lateral/sagittal shoulder corrections. Existing 8 mm clearance threshold is unchanged; verify complete CI and visual pose.

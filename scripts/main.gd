@@ -1047,7 +1047,7 @@ func _smoke() -> void:
             push_error("Insufficient live arm surface samples: " + str(key))
             get_tree().quit(1)
             return
-    if secondary_collision.torso_samples.is_empty() or idle_torso_overlap > 0.008:
+    if secondary_collision.torso_samples.is_empty() or secondary_collision.torso_triangles.is_empty() or idle_torso_overlap > 0.008:
         push_error("Resting arm intersects torso collision surface")
         get_tree().quit(1)
         return
