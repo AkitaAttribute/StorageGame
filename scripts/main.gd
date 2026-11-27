@@ -13,6 +13,11 @@ const DIRECTIONAL_CHARACTER := "res://assets/directional_walk.glb"
 const SPEED := 3.4
 const TRAVEL_TURN_RATE := deg_to_rad(420.0)
 const TRAVEL_TURN_RESPONSE := 12.0
+const CARRY_TURN_LIMIT := deg_to_rad(65.0)
+var carry_backward := false
+var carry_was_holding := false
+var carry_was_moving := false
+var carry_aim_ready := false
 const ROLLUP_SCENE = preload("res://scenes/rollup_unit.tscn")
 const CHARACTER_HEIGHT := 1.7
 const PLAYER_CAPSULE_HEIGHT := 1.65
@@ -684,25 +689,40 @@ func _physics_process(delta: float) -> void:
         player.position = Vector3(-10.4, 0.1, 5)
         visual_step_offset = 0.0
         visual.position.y = 0.0
-    if is_instance_valid(household) and is_instance_valid(household.held):
+    var carrying := is_instance_valid(household) and is_instance_valid(household.held)
+    if carrying:
         var facing := household.held.global_position - player.global_position
         facing.y = 0.0
         if facing.length_squared() > 0.01:
-            visual.rotation.y = rotate_toward(visual.rotation.y, atan2(facing.x, facing.z), deg_to_rad(420.0) * delta)
+            var moving_input := direction.length() > 0.05
+            var aim_yaw := travel_yaw(facing)
+            if moving_input:
+                var relative := facing.normalized().dot(direction.normalized())
+                carry_backward = carry_reverse_mode(relative, carry_backward and carry_was_holding and carry_was_moving)
+                # Turn toward travel (or the opposite for backpedaling),
+                # but stay within reach of the held object. There are no
+                # lateral/diagonal gait switches.
+                var walk_yaw := travel_yaw(direction) + (PI if carry_backward else 0.0)
+                aim_yaw += clampf(angle_difference(aim_yaw, walk_yaw), -CARRY_TURN_LIMIT, CARRY_TURN_LIMIT)
+            else:
+                carry_backward = false
+            visual.rotation.y = smooth_travel_turn(visual.rotation.y, aim_yaw, delta)
+            carry_was_moving = moving_input
     elif direction.length() > 0.05:
         visual.rotation.y = smooth_travel_turn(visual.rotation.y, travel_yaw(direction), delta)
+    carry_was_holding = carrying
+    if not carrying:
+        carry_backward = false
+        carry_was_moving = false
     if animator != null:
         var displacement := player.position - previous_position
         var ground_speed := Vector2(displacement.x, displacement.z).length() / maxf(delta, 0.001)
         var moving := ground_speed > 0.08 and direction.length() > 0.05
         if avatar_ready:
-            var holding_direction := is_instance_valid(household) and is_instance_valid(household.held)
             var animation_velocity := displacement / maxf(delta, 0.001)
-            var requested_suffix := ""
-            if moving and not holding_direction:
-                # Choose the requested gait at input change, not after the
-                # character completes its turn. Preserve phase across clips.
-                requested_suffix = "fwd"
+            # Explicit two-clip carrying locomotion. Never classify measured
+            # diagonal velocity into a new animation on every physics tick.
+            var requested_suffix := "bwd" if carrying and carry_backward else "fwd"
             animate_directional(delta, animation_velocity, moving, requested_suffix)
             if natural_gait != null and natural_gait.ready:
                 var holding_prop := is_instance_valid(household) and is_instance_valid(household.held)
@@ -717,7 +737,14 @@ func _physics_process(delta: float) -> void:
             household.toggle_grab()
         var holding := is_instance_valid(household.held)
         if holding:
-            force_target = household.held.global_position
+            var target_point := household.held.global_position
+            if not carry_aim_ready:
+                force_target = target_point
+                carry_aim_ready = true
+            else:
+                force_target = force_target.lerp(target_point, 1.0 - exp(-delta * 16.0))
+        else:
+            carry_aim_ready = false
         force_pose_weight = move_toward(force_pose_weight, 1.0 if holding else 0.0, delta * 6.0)
         if avatar_ready and force_pose_weight > 0.0:
             retargeter.apply_force_pose(force_target, force_pose_weight)
@@ -744,6 +771,11 @@ func gait_suffix(local_velocity: Vector3) -> String:
     var sector := posmod(roundi(heading / (PI / 4.0)), 8)
     return ["fwd", "fwd_l", "l", "bwd_l", "bwd", "bwd_r", "r", "fwd_r"][sector]
 
+# Hysteresis prevents diagonal or jittering input from repeatedly
+# switching the carry cycle. Rearward entry and exit have different limits.
+func carry_reverse_mode(forward_dot: float, previously_backward: bool) -> bool:
+    return forward_dot < (0.05 if previously_backward else -0.40)
+
 func travel_yaw(direction: Vector3) -> float:
     return atan2(direction.x, direction.z)
 
@@ -756,7 +788,7 @@ func animate_directional(delta: float, velocity: Vector3, moving: bool, requeste
     var suffix := gait_suffix(visual.global_transform.basis.inverse() * velocity) if moving else ""
     if moving and not requested_suffix.is_empty():
         suffix = requested_suffix
-    var use_directional := moving and suffix != "fwd" and direction_clips.has(suffix)
+    var use_directional := moving and suffix == "bwd" and direction_clips.has("bwd")
     var ap := directional_animator if use_directional else animator
     var active_rig := directional_rig if use_directional else retargeter
     var clip: StringName = direction_clips[suffix] if use_directional else (walk if moving else idle)
@@ -957,6 +989,14 @@ func _smoke() -> void:
             push_error("Arm motion is too stiff: " + side)
             get_tree().quit(1)
             return
+    if carry_reverse_mode(-0.2, false) or not carry_reverse_mode(-0.8, false) or not carry_reverse_mode(-0.2, true) or carry_reverse_mode(0.8, true):
+        push_error("Carry forward/backward hysteresis regression")
+        get_tree().quit(1)
+        return
+    if natural_gait.hand_frames.size() != 2 or natural_gait.hand_points("left").size() < 5 or natural_gait.hand_points("right").size() < 5:
+        push_error("Anatomical hand rig failed to initialize")
+        get_tree().quit(1)
+        return
     print("DIRECTIONAL_SMOKE_PASS")
     var prop_wait := 0
     while not household.placement_complete and prop_wait < 120:

@@ -16,13 +16,21 @@ var last_root := Vector3.ZERO
 var pelvis_offset := 0.0
 var skirt_half_width := 0.20
 # Presentation defaults for Shino, not population-wide anatomical limits.
-const ARM_IDLE_ABDUCTION := 12.0
-const ARM_SWING_ABDUCTION := 10.0
+const ARM_IDLE_ABDUCTION := 17.0
+const ARM_SWING_ABDUCTION := 15.0
 const ARM_MAX_SWING := 23.0
 const ARM_RESPONSE := 18.0
 var arm_angles: Dictionary = {"left": 0.0, "right": 0.0}
 var elbow_angles: Dictionary = {"left": 9.0, "right": 9.0}
 var arm_activity := 0.0
+var hand_frames: Dictionary = {}
+var hand_samples: Dictionary = {}
+var arm_clearance: Dictionary = {"left": 0.0, "right": 0.0}
+# Conservative physical skirt envelope (metres), refined from skin vertices.
+var skirt_top := 0.10
+var skirt_bottom := -0.40
+var skirt_depth := 0.17
+var measured_skirt_width := 0.0
 
 func setup(retargeter: RefCounted, body: CharacterBody3D, visual_root: Node3D, avatar_root: Node3D, rest_y: float) -> void:
     rig = retargeter
@@ -41,7 +49,115 @@ func setup(retargeter: RefCounted, body: CharacterBody3D, visual_root: Node3D, a
         feet[side] = {"locked": false, "anchor": Vector3.ZERO, "weight": 0.0, "previous_lift": 0.0}
     last_facing = visual.global_transform.basis.z.normalized()
     last_root = player.global_position
+    setup_hand_geometry()
+    measure_skirt_geometry()
     ready = true
+
+func setup_hand_geometry() -> void:
+    for side in ["left", "right"]:
+        var hand: int = rig.target_keys[side + "Hand"]
+        var middle := skeleton.find_bone("VRM_" + side + "MiddleProximal")
+        var index := skeleton.find_bone("VRM_" + side + "IndexProximal")
+        var little := skeleton.find_bone("VRM_" + side + "LittleProximal")
+        if little < 0:
+            little = skeleton.find_bone("VRM_" + side + "PinkyProximal")
+        var samples: Array[int] = [hand]
+        for finger in ["Thumb", "Index", "Middle", "Ring", "Little", "Pinky"]:
+            for joint in ["Proximal", "Intermediate", "Distal"]:
+                var bone := skeleton.find_bone("VRM_" + side + finger + joint)
+                if bone >= 0:
+                    samples.append(bone)
+        hand_samples[side] = samples
+        if mini(middle, mini(index, little)) < 0:
+            continue
+        var rest := skeleton.get_bone_global_rest(hand)
+        var along := (skeleton.get_bone_global_rest(middle).origin - rest.origin).normalized()
+        var across := skeleton.get_bone_global_rest(index).origin - skeleton.get_bone_global_rest(little).origin
+        across = (across - along * across.dot(along)).normalized()
+        if across.length_squared() < 0.001 or along.length_squared() < 0.001:
+            continue
+        var frame := Basis(across, along, across.cross(along)).orthonormalized()
+        hand_frames[side] = frame.inverse() * rest.basis.orthonormalized()
+        # Set a small permanent finger curl in the model's own rest axes.
+        # Thumb stays in its authored pose; all fingers retain their lengths.
+        var side_sign := signf((rig.target_basis * (skeleton.get_bone_global_rest(middle).origin - rest.origin)).x)
+        if is_zero_approx(side_sign):
+            side_sign = 1.0 if side == "left" else -1.0
+        var palm_sign := side_sign
+        var palm := frame.z * palm_sign
+        # In the T pose, use the down-facing palm surface to disambiguate.
+        var common_palm: Vector3 = rig.target_basis * palm
+        if absf(common_palm.y) > 0.2 and common_palm.y > 0.0:
+            palm = -palm
+        for finger in ["Index", "Middle", "Ring", "Little", "Pinky"]:
+            for joint in ["Proximal", "Intermediate", "Distal"]:
+                var bone := skeleton.find_bone("VRM_" + side + finger + joint)
+                if bone < 0:
+                    continue
+                var parent := skeleton.get_bone_parent(bone)
+                if parent < 0:
+                    continue
+                var children := skeleton.get_bone_children(bone)
+                var rest_bone := skeleton.get_bone_global_rest(bone)
+                var axis := rest_bone.origin - skeleton.get_bone_global_rest(parent).origin
+                if not children.is_empty():
+                    axis = skeleton.get_bone_global_rest(children[0]).origin - rest_bone.origin
+                var curl_axis := axis.normalized().cross(palm).normalized()
+                if curl_axis.length_squared() < 0.001:
+                    continue
+                var curl := deg_to_rad(12.0 if joint == "Intermediate" else 8.0)
+                var rotated := Basis(curl_axis, curl) * rest_bone.basis
+                var local := skeleton.get_bone_global_rest(parent).basis.inverse() * rotated
+                skeleton.set_bone_pose_rotation(bone, local.orthonormalized().get_rotation_quaternion())
+    skeleton.force_update_all_bone_transforms()
+    print("HAND_RIG frames=", hand_frames.size(), " samples=", hand_samples)
+
+func measure_skirt_geometry() -> void:
+    var hips: int = rig.target_keys["hips"]
+    var pelvis := visual.to_local(skeleton.to_global(skeleton.get_bone_global_rest(hips).origin))
+    # Inspect rest mesh vertices weighted to skirt bones. This measures the
+    # actual fabric rather than assuming that joint centers are its edge.
+    for node in avatar.find_children("*", "MeshInstance3D", true, false):
+        var mesh_node := node as MeshInstance3D
+        var skin := mesh_node.skin
+        if mesh_node.mesh == null or skin == null:
+            continue
+        var skirt_binds: Dictionary = {}
+        for bind in range(skin.get_bind_count()):
+            var name := str(skin.get_bind_name(bind))
+            var bone := skin.get_bind_bone(bind)
+            if name.is_empty() and bone >= 0 and bone < skeleton.get_bone_count():
+                name = str(skeleton.get_bone_name(bone))
+            if name.begins_with("SEC_SKIRT_"):
+                skirt_binds[bind] = true
+        if skirt_binds.is_empty():
+            continue
+        for surface in range(mesh_node.mesh.get_surface_count()):
+            var arrays := mesh_node.mesh.surface_get_arrays(surface)
+            if arrays[Mesh.ARRAY_BONES] == null or arrays[Mesh.ARRAY_WEIGHTS] == null:
+                continue
+            var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+            var bones: PackedInt32Array = arrays[Mesh.ARRAY_BONES]
+            var weights: PackedFloat32Array = arrays[Mesh.ARRAY_WEIGHTS]
+            if vertices.is_empty() or bones.is_empty() or weights.size() != bones.size():
+                continue
+            var stride := int(bones.size() / vertices.size())
+            for i in range(vertices.size()):
+                var influence := 0.0
+                for j in range(stride):
+                    if skirt_binds.has(bones[i * stride + j]):
+                        influence += weights[i * stride + j]
+                if influence < 0.25:
+                    continue
+                var point := visual.to_local(mesh_node.to_global(vertices[i])) - pelvis
+                # Reject unrelated vertices if importer coordinates differ.
+                if absf(point.x) > 0.45 or absf(point.z) > 0.40 or point.y > 0.20 or point.y < -0.65:
+                    continue
+                measured_skirt_width = maxf(measured_skirt_width, absf(point.x))
+                skirt_depth = maxf(skirt_depth, absf(point.z))
+                skirt_top = maxf(skirt_top, point.y)
+                skirt_bottom = minf(skirt_bottom, point.y)
+    print("SKIRT_GEOMETRY width=", measured_skirt_width, " depth=", skirt_depth, " range=", skirt_bottom, ",", skirt_top)
 
 func set_global_rotation(bone: int, desired: Basis, blend: float) -> void:
     var parent := skeleton.get_bone_parent(bone)
@@ -113,87 +229,101 @@ func keep_arms_clear(delta: float, speed: float, holding: bool) -> void:
         var elbow_flex := lerpf(float(elbow_angles[side]), flex, response)
         elbow_angles[side] = elbow_flex
         var abduct := deg_to_rad(lerpf(ARM_IDLE_ABDUCTION, ARM_SWING_ABDUCTION, arm_activity))
-        # Slight lateral freedom at the shoulder; forearm falls closer to
-        # vertical, not a rigid continuation of the shoulder's angle.
+        # Keep the elbows naturally outside the torso. The forearm can
+        # swing independently without forcing the wrist inward.
         var lateral := sign_side * sin(abduct)
         var upper_dir := Vector3(lateral, -cos(abduct) * cos(swing), cos(abduct) * sin(swing)).normalized()
         var fore_angle := swing + deg_to_rad(elbow_flex)
-        var lower_dir := Vector3(lateral * 0.45, -cos(fore_angle), sin(fore_angle)).normalized()
+        var lower_dir := Vector3(lateral * 0.78, -cos(fore_angle), sin(fore_angle)).normalized()
         rig.aim_arm_bone(upper, lower, common.inverse() * upper_dir, 1.0)
         rig.aim_arm_bone(lower, hand, common.inverse() * lower_dir, 1.0)
-        # Keep a relaxed wrist, but retain some authored wrist articulation.
-        var rest_hand := skeleton.get_bone_rest(hand).basis.get_rotation_quaternion()
-        var posed_hand := skeleton.get_bone_pose_rotation(hand)
-        skeleton.set_bone_pose_rotation(hand, rest_hand.slerp(posed_hand, 0.30 * arm_activity))
-        skeleton.force_update_all_bone_transforms()
-        constrain_hand(side, sign_side)
+        stabilize_hand(side, sign_side)
+        constrain_hand(side, sign_side, delta)
 
-# Solve the wrist against a character-local skirt envelope using real
-# measured arm lengths, rather than guessing a fixed shoulder angle.
-func constrain_hand(side: String, sign_side: float) -> void:
-    var upper: int = rig.target_keys[side + "UpperArm"]
-    var lower: int = rig.target_keys[side + "LowerArm"]
+# Keep thumbs forward and palms inward. The hand's basis is derived from
+# its own finger joints; a stable anatomical frame eliminates donor wrist
+# twisting and frame-to-frame slerps toward a different rest orientation.
+func stabilize_hand(side: String, sign_side: float) -> void:
     var hand: int = rig.target_keys[side + "Hand"]
+    var lower: int = rig.target_keys[side + "LowerArm"]
+    if not hand_frames.has(side):
+        skeleton.set_bone_pose_rotation(hand, skeleton.get_bone_rest(hand).basis.get_rotation_quaternion())
+        skeleton.force_update_all_bone_transforms()
+        return
+    var common: Basis = rig.target_basis
+    var along := (common * (skeleton.get_bone_global_pose(hand).origin - skeleton.get_bone_global_pose(lower).origin)).normalized()
+    var across := Vector3(0, 0, 1) - along * along.z
+    if across.length_squared() < 0.001:
+        across = Vector3(sign_side, 0, 0) - along * along.x * sign_side
+    across = across.normalized()
+    var frame := Basis(across, along, across.cross(along)).orthonormalized()
+    var rest_offset: Basis = hand_frames[side]
+    set_global_rotation(hand, common.inverse() * frame * rest_offset, 1.0)
+
+func hand_points(side: String) -> Array[Vector3]:
+    var result: Array[Vector3] = []
+    for bone in hand_samples.get(side, []):
+        var point := skeleton.get_bone_global_pose(bone).origin
+        result.append(visual.to_local(skeleton.to_global(point)))
+        # Include fingertip beyond the distal joint using its parent axis.
+        var name := str(skeleton.get_bone_name(bone))
+        if name.ends_with("Distal"):
+            var parent := skeleton.get_bone_parent(bone)
+            if parent >= 0:
+                var axis := point - skeleton.get_bone_global_pose(parent).origin
+                result.append(visual.to_local(skeleton.to_global(point + axis * 0.75)))
+    if result.size() < 3:
+        var wrist: int = rig.target_keys[side + "Hand"]
+        var elbow: int = rig.target_keys[side + "LowerArm"]
+        var at := visual.to_local(skeleton.to_global(skeleton.get_bone_global_pose(wrist).origin))
+        var from := visual.to_local(skeleton.to_global(skeleton.get_bone_global_pose(elbow).origin))
+        result.append(at + (at - from).normalized() * 0.12)
+    return result
+
+func hand_penetration(side: String, sign_side: float) -> float:
     var hips: int = rig.target_keys["hips"]
-    var shoulder := skeleton.get_bone_global_pose(upper).origin
-    var elbow := skeleton.get_bone_global_pose(lower).origin
-    var wrist := skeleton.get_bone_global_pose(hand).origin
     var pelvis := visual.to_local(skeleton.to_global(skeleton.get_bone_global_pose(hips).origin))
-    var local_wrist := visual.to_local(skeleton.to_global(wrist))
-    var local_elbow := visual.to_local(skeleton.to_global(elbow))
-    # Include the extended hand/fingers, not just the wrist center.
-    var finger_tip := local_wrist + (local_wrist - local_elbow).normalized() * 0.095
-    var hand_low := minf(local_wrist.y, finger_tip.y)
-    var hand_high := maxf(local_wrist.y, finger_tip.y)
-    if hand_low > pelvis.y + 0.055 or hand_high < pelvis.y - 0.40:
-        return
-    # Taper the skirt from waist to hem and evaluate the hand at its
-    # actual height/depth. The skirt bones can yield slightly to contact;
-    # do not force both arms beyond the widest hem at all times.
+    var width := maxf(skirt_half_width, measured_skirt_width) + 0.035
     var correction := 0.0
-    for sample in [local_wrist, local_wrist.lerp(finger_tip, 0.5), finger_tip]:
-        var point: Vector3 = sample
-        var down := pelvis.y - point.y
-        if down < -0.055 or down > 0.36:
+    for point in hand_points(side):
+        var p := point - pelvis
+        if p.y > skirt_top + 0.03 or p.y < skirt_bottom - 0.03:
             continue
-        var width := lerpf(skirt_half_width * 0.63, skirt_half_width, clampf(down / 0.30, 0.0, 1.0))
-        var depth := absf(point.z - pelvis.z)
-        var depth_radius := lerpf(0.105, 0.165, clampf(down / 0.30, 0.0, 1.0))
-        if depth >= depth_radius + 0.028:
+        if absf(p.z) > skirt_depth + 0.035:
             continue
-        var ellipse := sqrt(maxf(0.0, 1.0 - pow(depth / (depth_radius + 0.028), 2.0)))
-        var minimum := width * ellipse + 0.019
-        var clearance := (point.x - pelvis.x) * sign_side
-        correction = maxf(correction, minimum - clearance)
-    if correction <= 0.0:
+        # Conservative rectangle at hand height, rather than a narrow
+        # ellipse that lets fingers clip the flared side of the garment.
+        correction = maxf(correction, width - p.x * sign_side)
+    return correction
+
+# Rotate the entire arm chain about its shoulder. This retains the
+# original elbow and wrist flexion, unlike a new IK pole every frame.
+func abduct_chain(side: String, sign_side: float, radians: float) -> void:
+    if radians <= 0.00001:
         return
-    local_wrist.x += sign_side * correction
-    local_wrist.y += minf(0.025, correction * 0.25)
-    var goal := skeleton.to_local(visual.to_global(local_wrist))
-    var upper_length := shoulder.distance_to(elbow)
-    var lower_length := elbow.distance_to(wrist)
-    if minf(upper_length, lower_length) < 0.0001:
-        return
-    var axis := goal - shoulder
-    if axis.length_squared() < 0.000001:
-        return
-    var distance := clampf(axis.length(), absf(upper_length - lower_length) + 0.001, (upper_length + lower_length) * 0.997)
-    axis = axis.normalized()
-    var pole := elbow - shoulder
-    pole -= axis * pole.dot(axis)
-    if pole.length_squared() < 0.00001:
-        var outward: Vector3 = rig.target_basis.inverse() * Vector3(sign_side, 0, -0.2)
-        pole = outward - axis * outward.dot(axis)
-    if pole.length_squared() < 0.00001:
-        return
-    var along := (upper_length * upper_length + distance * distance - lower_length * lower_length) / (2.0 * distance)
-    var bend := sqrt(maxf(0.0, upper_length * upper_length - along * along))
-    var knee := shoulder + axis * along + pole.normalized() * bend
-    rig.aim_arm_bone(upper, lower, knee - shoulder, 1.0)
-    var new_elbow := skeleton.get_bone_global_pose(lower).origin
-    rig.aim_arm_bone(lower, hand, shoulder + axis * distance - new_elbow, 1.0)
-    # The contact correction moves the arm chain, not the hand pose.
-    skeleton.force_update_all_bone_transforms()
+    var bone: int = rig.target_keys[side + "UpperArm"]
+    var common: Basis = rig.target_basis
+    var pose := skeleton.get_bone_global_pose(bone).basis.orthonormalized()
+    var turn := common.inverse() * Basis(Vector3.BACK, sign_side * radians) * common
+    set_global_rotation(bone, turn * pose, 1.0)
+
+func constrain_hand(side: String, sign_side: float, delta: float) -> void:
+    var old := float(arm_clearance[side])
+    var applied := maxf(0.0, old - delta * deg_to_rad(40.0))
+    abduct_chain(side, sign_side, applied)
+    stabilize_hand(side, sign_side)
+    # A few bounded angular corrections are enough for a normal arm.
+    # Immediate attack prevents clipping; slow release avoids twitching
+    # when a fingertip enters or leaves the skirt envelope.
+    for i in range(5):
+        var overlap := hand_penetration(side, sign_side)
+        if overlap <= 0.001 or applied >= deg_to_rad(26.0):
+            break
+        var step := minf(deg_to_rad(26.0) - applied, clampf(overlap / 0.45, deg_to_rad(1.0), deg_to_rad(8.0)))
+        abduct_chain(side, sign_side, step)
+        stabilize_hand(side, sign_side)
+        applied += step
+    arm_clearance[side] = applied
 
 func ground_at(point: Vector3) -> Dictionary:
     var query := PhysicsRayQueryParameters3D.create(point + Vector3.UP * 0.40, point - Vector3.UP * 0.55, 1, [player.get_rid()])
