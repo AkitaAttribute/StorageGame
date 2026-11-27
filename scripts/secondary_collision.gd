@@ -30,6 +30,12 @@ var torso_triangles: Array[Vector3i] = []
 var torso_triangle_grid: Dictionary = {}
 var live_torso_vertices := PackedVector3Array()
 var shoulder_pitch: Dictionary = {"left": 0.0, "right": 0.0}
+var shoulder_state: Dictionary = {"left": "", "right": ""}
+var shoulder_release_clock: Dictionary = {"left": 0.0, "right": 0.0}
+var shoulder_search_clock: Dictionary = {"left": 0.0, "right": 0.0}
+var torso_grid_bones: Dictionary = {}
+var torso_grid_meshes: Dictionary = {}
+var torso_grid_valid := false
 var skirt_sample_bones: Dictionary = {}
 var skirt_rest_positions: Dictionary = {}
 var skirt_compression: Dictionary = {"left": 0.0, "right": 0.0}
@@ -64,6 +70,15 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
     cache_skirt_surface(avatar)
     for key in arm_samples:
         arm_surface_counts[key] = arm_samples[key].size()
+    # Cache only dependencies of the torso, not the entire skeleton.
+    for sample in torso_triangle_vertices:
+        for bone in sample["ids"]:
+            torso_grid_bones[bone] = Transform3D.IDENTITY
+        torso_grid_meshes[sample["mesh"]] = Transform3D.IDENTITY
+    for sample in torso_samples:
+        for bone in sample["ids"]:
+            torso_grid_bones[bone] = Transform3D.IDENTITY
+        torso_grid_meshes[sample["mesh"]] = Transform3D.IDENTITY
     print("ARM_SURFACE_SAMPLES ", arm_surface_counts, " torso_triangles=", torso_triangles.size())
     print("SECONDARY_COLLISION hair=", groups["HAIR"].size(), " skirt=", groups["SKIRT"].size(), " skirt_width=", skirt_half_width, " surface_samples=", skirt_samples.size(), " torso_samples=", torso_samples.size())
 
@@ -211,6 +226,30 @@ func rendered_surface(samples: Array) -> PackedVector3Array:
     return output
 
 func refresh_torso_grid() -> void:
+    # Reuse the exact mesh grid while the driving transforms are stable.
+    # A small sub-millimetre tolerance avoids rebuilding for numerical
+    # roundoff in a stationary character. Hair/skirt movement is irrelevant.
+    var dirty := not torso_grid_valid
+    for bone in torso_grid_bones:
+        var current := skeleton.get_bone_global_pose(bone)
+        var cached: Transform3D = torso_grid_bones[bone]
+        if current.origin.distance_squared_to(cached.origin) > 0.00000001 or not current.basis.is_equal_approx(cached.basis):
+            dirty = true
+            break
+    if not dirty:
+        for mesh_node in torso_grid_meshes:
+            var current: Transform3D = visual.global_transform.affine_inverse() * mesh_node.global_transform
+            var cached: Transform3D = torso_grid_meshes[mesh_node]
+            if current.origin.distance_squared_to(cached.origin) > 0.00000001 or not current.basis.is_equal_approx(cached.basis):
+                dirty = true
+                break
+    if not dirty:
+        return
+    for bone in torso_grid_bones:
+        torso_grid_bones[bone] = skeleton.get_bone_global_pose(bone)
+    for mesh_node in torso_grid_meshes:
+        torso_grid_meshes[mesh_node] = visual.global_transform.affine_inverse() * mesh_node.global_transform
+    torso_grid_valid = true
     torso_grid.clear()
     torso_triangle_grid.clear()
     live_torso_vertices = rendered_surface(torso_triangle_vertices)
@@ -337,41 +376,76 @@ func solve_arm_torso(delta: float, gait: RefCounted, holding: bool) -> void:
         if holding and side == "right":
             torso_residual[side] = 0.0
             shoulder_pitch[side] = 0.0
+            shoulder_state[side] = ""
             forearm_residual[side] = 0.0
             continue
         var sign_side: float = gait.arm_sides[side]
-        # Find a low-cost local shoulder adjustment; avoid the old
-        # purely lateral solver chasing an impossible armhole contact.
+        # The base animation resets the pose each tick. Reuse the last
+        # contact solution rather than searching the full angle grid every
+        # time a gradual release enters the surface by a fraction of a mm.
         var bone: int = rig.target_keys[side + "UpperArm"]
         var base := skeleton.get_bone_pose_rotation(bone)
-        var shoulder_offset := maxf(0.0, float(torso_residual[side]) - delta * deg_to_rad(35.0))
-        var pitch := move_toward(float(shoulder_pitch[side]), 0.0, delta * deg_to_rad(35.0))
+        var state: String = gait.arm_state
+        var state_changed := str(shoulder_state[side]) != state
+        shoulder_state[side] = state
+        var shoulder_offset: float = torso_residual[side]
+        var pitch: float = shoulder_pitch[side]
+        if state_changed:
+            shoulder_offset = 0.0
+            pitch = 0.0
+            shoulder_search_clock[side] = 0.0
+        shoulder_release_clock[side] = float(shoulder_release_clock[side]) + delta
+        shoulder_search_clock[side] = maxf(0.0, float(shoulder_search_clock[side]) - delta)
         apply_shoulder_candidate(gait, bone, base, sign_side, shoulder_offset, pitch)
         var contact := arm_body_overlap(side, sign_side, false)
-        if contact > 0.001:
-            var best := Vector2(shoulder_offset, pitch)
-            var best_overlap := contact
-            var best_cost := 1000.0
-            # Search absolute bounded rotations. A lower-cost solution
-            # prefers the arms near the hips; sagittal motion can clear
-            # a rib without raising the elbow out into an A-pose.
-            for lateral in [0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0]:
-                for sagittal in [0.0, -8.0, 8.0, -16.0, 16.0, -24.0, 24.0]:
-                    var cost := float(lateral) * 1.5 + absf(float(sagittal))
-                    if best_overlap <= 0.001 and cost >= best_cost:
-                        continue
-                    var candidate := Vector2(deg_to_rad(float(lateral)), deg_to_rad(float(sagittal)))
+        var best := Vector2(shoulder_offset, pitch)
+        var best_overlap := contact
+        # Occasionally try releasing toward neutral. Reject the candidate
+        # if it would re-enter the torso, so resting contact stays steady.
+        if contact <= 0.001 and float(shoulder_release_clock[side]) >= 0.25:
+            shoulder_release_clock[side] = 0.0
+            var candidate := Vector2(maxf(0.0, shoulder_offset - deg_to_rad(1.0)), move_toward(pitch, 0.0, deg_to_rad(1.0)))
+            if not candidate.is_equal_approx(best):
+                apply_shoulder_candidate(gait, bone, base, sign_side, candidate.x, candidate.y)
+                var error := arm_body_overlap(side, sign_side, false)
+                if error <= 0.001:
+                    best = candidate
+                    best_overlap = error
+        if best_overlap > 0.001:
+            # Local contact correction normally needs only a few candidate
+            # evaluations. A full bounded search is reserved for initial
+            # entry or a persistent error, at most once per quarter second.
+            for step in [2.0, 4.0]:
+                var origin := best
+                for change in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1), Vector2(1, 1), Vector2(1, -1)]:
+                    var candidate: Vector2 = origin + change * deg_to_rad(float(step))
+                    candidate.x = clampf(candidate.x, 0.0, deg_to_rad(28.0))
+                    candidate.y = clampf(candidate.y, -deg_to_rad(24.0), deg_to_rad(24.0))
                     apply_shoulder_candidate(gait, bone, base, sign_side, candidate.x, candidate.y)
                     var error := arm_body_overlap(side, sign_side, false)
-                    if (error <= 0.001 and (best_overlap > 0.001 or cost < best_cost)) or (best_overlap > 0.001 and error < best_overlap):
+                    if error < best_overlap:
                         best = candidate
                         best_overlap = error
-                        best_cost = cost
-            shoulder_offset = best.x
-            pitch = best.y
-            apply_shoulder_candidate(gait, bone, base, sign_side, shoulder_offset, pitch)
-        torso_residual[side] = shoulder_offset
-        shoulder_pitch[side] = pitch
+                if best_overlap <= 0.001:
+                    break
+            if best_overlap > 0.001 and float(shoulder_search_clock[side]) <= 0.0:
+                shoulder_search_clock[side] = 0.25
+                var best_cost := 1000.0
+                for lateral in [0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0]:
+                    for sagittal in [0.0, -8.0, 8.0, -16.0, 16.0, -24.0, 24.0]:
+                        var cost := float(lateral) * 1.5 + absf(float(sagittal))
+                        if best_overlap <= 0.001 and cost >= best_cost:
+                            continue
+                        var candidate := Vector2(deg_to_rad(float(lateral)), deg_to_rad(float(sagittal)))
+                        apply_shoulder_candidate(gait, bone, base, sign_side, candidate.x, candidate.y)
+                        var error := arm_body_overlap(side, sign_side, false)
+                        if (error <= 0.001 and (best_overlap > 0.001 or cost < best_cost)) or (best_overlap > 0.001 and error < best_overlap):
+                            best = candidate
+                            best_overlap = error
+                            best_cost = cost
+        apply_shoulder_candidate(gait, bone, base, sign_side, best.x, best.y)
+        torso_residual[side] = best.x
+        shoulder_pitch[side] = best.y
         var elbow_offset := maxf(0.0, float(forearm_residual[side]) - delta * deg_to_rad(55.0))
         rotate_forearm(side, sign_side, elbow_offset)
         for iteration in range(6):
