@@ -48,8 +48,8 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
         skirt_rest_positions[bone] = skeleton.get_bone_rest(bone).origin
     for side in ["left", "right"]:
         for suffix in ["UpperArm", "LowerArm"]:
-            var key := side + suffix
-            var child := side + ("LowerArm" if suffix == "UpperArm" else "Hand")
+            var key: String = str(side) + str(suffix)
+            var child: String = str(side) + ("LowerArm" if suffix == "UpperArm" else "Hand")
             var bone: int = rig.target_keys[key]
             arm_rest_segments[bone] = [common_rest(bone), common_rest(int(rig.target_keys[child])), key]
             arm_radius_observations[key] = []

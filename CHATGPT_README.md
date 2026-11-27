@@ -146,3 +146,6 @@ text(await tools.mcp__GitHub__update_ref({
 
 ## Follow-up to Build 49
 The next code revision corrects the torso proxy selection (exclude blended sleeve/armhole attachments), measures limb radius from arm-weighted mesh vertices, assigns elbow clearance to the upper arm rather than testing an immovable pivot twice, uses measured correction leverage, and measures torso clearance after the final skirt contact pass. The 8 mm torso and 25 mm skirt regression limits remain unchanged. The idle baseline has a slight elbow-back bias. Verify the next workflow and actual front/side pose before considering the visual issue fixed.
+
+## Mandatory build verification (user directive, 2026-11-27)
+Until explicitly told otherwise, every code push must be followed through GitHub Actions to a successful build before reporting completion. If a run fails, inspect actual logs, fix the cause, push and verify the replacement run in the same conversation. Do not stop at queued/in progress. If a genuine tool/time/access blocker prevents this, disclose it and do not claim success. Build 50 failed at import because GDScript could not infer the type of key and child from Variant loop values; the next revision explicitly types these strings. Keep collision regressions intact.
