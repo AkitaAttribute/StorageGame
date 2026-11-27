@@ -278,12 +278,17 @@ func start_game(data: Dictionary) -> void:
             if directional_animator != null:
                 directional_animator.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
                 for suffix in ["fwd", "fwd_l", "l", "bwd_l", "bwd", "bwd_r", "r", "fwd_r"]:
-                    var expected := "walk_" + str(suffix) + "_loop"
+                    # Godot's scene importer can strip the _Loop suffix
+                    # when inferring looping playback. Match the exact
+                    # normalized direction, not a prefix of a diagonal.
+                    var expected := "walk" + str(suffix).replace("_", "")
                     for clip in directional_animator.get_animation_list():
-                        if str(clip).to_lower().get_file() == expected:
+                        var key := str(clip).get_file().to_lower().replace("_", "").replace("-", "").replace(" ", "").trim_suffix("loop")
+                        if key == expected:
                             direction_clips[suffix] = clip
                             directional_animator.get_animation(clip).loop_mode = Animation.LOOP_LINEAR
-                print("DIRECTIONAL_RIG ", direction_clips.keys())
+                            break
+                print("DIRECTIONAL_RIG ", direction_clips, " imported=", directional_animator.get_animation_list())
     camera = Camera3D.new()
     camera.fov = 65
     camera.near = 0.035
