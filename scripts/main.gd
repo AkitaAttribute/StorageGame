@@ -1018,10 +1018,10 @@ func _smoke() -> void:
         push_error("Idle wrist exceeded local retarget limit")
         get_tree().quit(1)
         return
-    var right_arm: int = retargeter.target_keys["rightUpperArm"]
-    var right_before := retargeter.target.get_bone_pose_rotation(right_arm)
+    var fk_test_right_arm: int = retargeter.target_keys["rightUpperArm"]
+    var right_before := retargeter.target.get_bone_pose_rotation(fk_test_right_arm)
     natural_gait.keep_arms_clear(1.0 / 60.0, 0.0, true)
-    if right_before.angle_to(retargeter.target.get_bone_pose_rotation(right_arm)) > 0.001:
+    if right_before.angle_to(retargeter.target.get_bone_pose_rotation(fk_test_right_arm)) > 0.001:
         push_error("Free-arm layer modified carrying arm")
         get_tree().quit(1)
         return
