@@ -16,13 +16,15 @@ var torso_samples: Array[Dictionary] = []
 var torso_residual: Dictionary = {"left": 0.0, "right": 0.0}
 var forearm_residual: Dictionary = {"left": 0.0, "right": 0.0}
 var last_torso_overlap := 0.0
-# Use model-derived limb thickness rather than generic human capsules.
+# Match the renderer's skinning transform instead of estimating limb
+# radius around rest joints which need not coincide with the skin bind.
 const BODY_MARGIN := 0.004
-var arm_radii: Dictionary = {}
-var arm_radius_counts: Dictionary = {}
-var arm_rest_segments: Dictionary = {}
-var arm_radius_observations: Dictionary = {}
-var arm_weighted_points: Dictionary = {}
+const BODY_CELL := 0.025
+var arm_samples: Dictionary = {}
+var arm_surface_counts: Dictionary = {}
+var arm_evaluated_counts: Dictionary = {}
+var arm_bone_keys: Dictionary = {}
+var torso_grid: Dictionary = {}
 var skirt_sample_bones: Dictionary = {}
 var skirt_rest_positions: Dictionary = {}
 var skirt_compression: Dictionary = {"left": 0.0, "right": 0.0}
@@ -50,31 +52,14 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
     for side in ["left", "right"]:
         for suffix in ["UpperArm", "LowerArm"]:
             var key: String = str(side) + str(suffix)
-            var child: String = str(side) + ("LowerArm" if suffix == "UpperArm" else "Hand")
             var bone: int = rig.target_keys[key]
-            arm_rest_segments[bone] = [common_rest(bone), common_rest(int(rig.target_keys[child])), key]
-            arm_radius_observations[key] = []
-            arm_weighted_points[key] = []
+            arm_bone_keys[bone] = key
+            arm_samples[key] = []
+            arm_evaluated_counts[key] = 0
     cache_skirt_surface(avatar)
-    for key in arm_radius_observations:
-        var observations: Array = arm_radius_observations[key]
-        # Some imported glTF skins use a bind-space different from the
-        # skeleton's rest transforms. Fit a transverse section of the
-        # strongly weighted vertex cloud if absolute joint alignment is
-        # unavailable. This still measures actual mesh thickness.
-        # A sleeve can be wider than the elbow and the upper arm is
-        # tested only over its distal half. Use local cross sections
-        # rather than one radius for the entire weighted vertex cloud.
-        var fitted := fit_weighted_radius(str(key))
-        if fitted.size() >= 5:
-            observations = fitted
-        observations.sort()
-        arm_radius_counts[key] = observations.size()
-        var fallback := 0.030 if str(key).ends_with("UpperArm") else 0.025
-        arm_radii[key] = fallback if observations.is_empty() else clampf(float(observations[mini(observations.size() - 1, int(observations.size() * 0.90))]), 0.015, 0.050)
-    print("ARM_COLLISION_RADII ", arm_radii, " samples=", arm_radius_counts)
-    for key in arm_weighted_points:
-        print("ARM_WEIGHTED_VERTICES ", key, " count=", arm_weighted_points[key].size())
+    for key in arm_samples:
+        arm_surface_counts[key] = arm_samples[key].size()
+    print("ARM_SURFACE_SAMPLES ", arm_surface_counts)
     print("SECONDARY_COLLISION hair=", groups["HAIR"].size(), " skirt=", groups["SKIRT"].size(), " skirt_width=", skirt_half_width, " surface_samples=", skirt_samples.size(), " torso_samples=", torso_samples.size())
 
 # Cache a spatially decimated set of actual skin-weighted fabric
@@ -83,6 +68,7 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
 func cache_skirt_surface(avatar: Node3D) -> void:
     var occupied: Dictionary = {}
     var torso_occupied: Dictionary = {}
+    var arm_occupied: Dictionary = {}
     var torso_bones: Array[int] = []
     for key in ["hips", "spine", "chest", "upperChest"]:
         if rig.target_keys.has(key):
@@ -114,6 +100,9 @@ func cache_skirt_surface(avatar: Node3D) -> void:
             for i in range(vertices.size()):
                 var ids: Array[int] = []
                 var amounts: Array[float] = []
+                var bind_points: Array[Vector3] = []
+                var arm_key := ""
+                var arm_weight := 0.0
                 var influence := 0.0
                 var torso_influence := 0.0
                 var total := 0.0
@@ -125,33 +114,29 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                     var bone: int = binds[bind]
                     ids.append(bone)
                     amounts.append(weight)
+                    bind_points.append(skin.get_bind_pose(bind) * vertices[i])
+                    if arm_bone_keys.has(bone) and weight > arm_weight:
+                        arm_weight = weight
+                        arm_key = str(arm_bone_keys[bone])
                     total += weight
                     if groups["SKIRT"].has(bone):
                         influence += weight
                     if torso_bones.has(bone):
                         torso_influence += weight
-                    # Skin bind transforms operate on the unposed mesh
-                    # vertex, yielding a point in the influencing joint's
-                    # coordinate system. Reconstruct the actual rest
-                    # point before comparing it with rest segment axes.
-                    if weight >= 0.35 and arm_rest_segments.has(bone):
-                        var segment: Array = arm_rest_segments[bone]
-                        var start: Vector3 = segment[0]
-                        var finish: Vector3 = segment[1]
-                        var bind_local := skin.get_bind_pose(bind) * vertices[i]
-                        var rest_point := skeleton.get_bone_global_rest(bone) * bind_local
-                        var common_point: Vector3 = rig.target_basis * rest_point * float(rig.target_scale)
-                        var axis := finish - start
-                        var t := (common_point - start).dot(axis) / maxf(axis.length_squared(), 0.000001)
-                        arm_weighted_points[segment[2]].append(common_point)
-                        if weight >= 0.60 and t >= 0.25 and t <= 0.85:
-                            var radius := common_point.distance_to(start + axis * t)
-                            if radius > 0.005 and radius < 0.08:
-                                arm_radius_observations[segment[2]].append(radius)
                 if total < 0.001:
                     continue
                 var local := skeleton.to_local(mesh_node.to_global(vertices[i]))
                 var common: Vector3 = rig.target_basis * local * float(rig.target_scale)
+                # Keep a decimated surface for each arm. Use the actual
+                # inverse bind matrices per influence, not inverse rest
+                # transforms. Retain joint-blend weights in the sample.
+                var rendered_sample := {"ids": ids, "weights": amounts, "total": total, "bind_points": bind_points, "mesh": mesh_node}
+                if arm_weight >= 0.45:
+                    var arm_cell := Vector3i(roundi(common.x / 0.012), roundi(common.y / 0.012), roundi(common.z / 0.012))
+                    var arm_id := arm_key + str(arm_cell)
+                    if not arm_occupied.has(arm_id):
+                        arm_occupied[arm_id] = true
+                        arm_samples[arm_key].append(rendered_sample)
                 if influence < 0.25 and torso_influence < 0.90:
                     continue
                 var p: Vector3 = common - pelvis
@@ -173,84 +158,43 @@ func cache_skirt_surface(avatar: Node3D) -> void:
                     skirt_samples.append(sample)
                 if add_torso:
                     torso_occupied[cell] = true
-                    torso_samples.append(sample)
+                    torso_samples.append(rendered_sample)
 
-# A translation-independent cross-section fit for skins whose bind
-# coordinates don't align with the imported rest joint centers.
-func fit_weighted_radius(key: String) -> Array:
-    var points: Array = arm_weighted_points[key]
-    if points.size() < 5:
-        return []
-    var bone: int = rig.target_keys[key]
-    var segment: Array = arm_rest_segments[bone]
-    var start: Vector3 = segment[0]
-    var finish: Vector3 = segment[1]
-    var axis := (finish - start).normalized()
-    # Fit the longitudinal axis from the actual weighted surface. A
-    # small bind/rest axis mismatch otherwise inflates all radii.
-    var center := Vector3.ZERO
-    for point in points:
-        var p: Vector3 = point
-        center += p
-    center /= float(points.size())
-    var fitted_axis := axis
-    for iteration in range(10):
-        var next := Vector3.ZERO
-        for point in points:
-            var offset: Vector3 = point - center
-            next += offset * offset.dot(fitted_axis)
-        if next.length_squared() < 0.000001:
-            break
-        fitted_axis = next.normalized()
-    if fitted_axis.dot(axis) < 0.0:
-        fitted_axis = -fitted_axis
-    # Keep the rig's anatomical direction if a wide sleeve dominates
-    # covariance and makes the fitted axis nearly perpendicular.
-    if fitted_axis.dot(axis) < 0.70:
-        fitted_axis = axis
-    var ordered: Array[Dictionary] = []
-    for point in points:
-        var p: Vector3 = point
-        ordered.append({"point": p, "along": (p - center).dot(fitted_axis)})
-    ordered.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["along"]) < float(b["along"]))
-    var estimates: Array[float] = []
-    var sample_count := 0
-    # Upper-arm collisions cover the lower half, beyond the sleeve
-    # attachment. Forearm thickness tapers, so use the proximal/middle
-    # sections, not the hand/wrist transition.
-    var first := 4 if key.ends_with("UpperArm") else 1
-    var last := 7 if key.ends_with("UpperArm") else 6
-    for section in range(first, last):
-        var lo := int(float(ordered.size()) * float(section) / 8.0)
-        var hi := int(float(ordered.size()) * float(section + 1) / 8.0)
-        if hi - lo < 5:
-            continue
-        var radial_center := Vector3.ZERO
-        var radial_points: Array[Vector3] = []
-        for i in range(lo, hi):
-            var p: Vector3 = ordered[i]["point"]
-            var relative := p - center
-            var radial := relative - fitted_axis * relative.dot(fitted_axis)
-            radial_center += radial
-            radial_points.append(radial)
-        radial_center /= float(radial_points.size())
-        var distances: Array[float] = []
-        for radial in radial_points:
-            distances.append(radial.distance_to(radial_center))
-        distances.sort()
-        estimates.append(distances[mini(distances.size() - 1, int(distances.size() * 0.90))])
-        sample_count += distances.size()
-    if estimates.is_empty():
-        return []
-    estimates.sort()
-    var typical: float = estimates[int(estimates.size() / 2)]
-    # Replicate the robust cross-section estimate for the setup code's
-    # existing percentile selection; counts still represent real samples.
-    var result: Array = []
-    result.resize(sample_count)
-    result.fill(typical)
-    print("ARM_RADIUS_SECTIONS ", key, " radii=", estimates, " median=", typical, " samples=", sample_count)
-    return result
+# Godot Skeleton3D supplies the renderer with global bone pose times
+# Skin bind pose. Evaluate the same linear blend at sampled vertices.
+func rendered_surface(samples: Array) -> PackedVector3Array:
+    var output := PackedVector3Array()
+    var poses: Dictionary = {}
+    var mesh_transforms: Dictionary = {}
+    var view_inverse := visual.global_transform.affine_inverse()
+    for sample in samples:
+        var ids: Array = sample["ids"]
+        var weights: Array = sample["weights"]
+        var points: Array = sample["bind_points"]
+        var mesh_node: MeshInstance3D = sample["mesh"]
+        if not mesh_transforms.has(mesh_node):
+            mesh_transforms[mesh_node] = view_inverse * mesh_node.global_transform
+        var mesh_to_visual: Transform3D = mesh_transforms[mesh_node]
+        var point := Vector3.ZERO
+        for i in range(ids.size()):
+            var bone: int = ids[i]
+            if not poses.has(bone):
+                poses[bone] = skeleton.get_bone_global_pose(bone)
+            var pose: Transform3D = poses[bone]
+            var bind_point: Vector3 = points[i]
+            point += (pose * bind_point) * float(weights[i])
+        output.append(mesh_to_visual * (point / float(sample["total"])))
+    return output
+
+func refresh_torso_grid() -> void:
+    torso_grid.clear()
+    for point in rendered_surface(torso_samples):
+        var cell := Vector2i(floori(point.y / BODY_CELL), floori(point.z / BODY_CELL))
+        if not torso_grid.has(cell):
+            torso_grid[cell] = PackedVector3Array()
+        var bucket: PackedVector3Array = torso_grid[cell]
+        bucket.append(point)
+        torso_grid[cell] = bucket
 
 func skirt_surface() -> PackedVector3Array:
     return skinned_surface(skirt_samples)
@@ -273,32 +217,33 @@ func skinned_surface(samples: Array[Dictionary]) -> PackedVector3Array:
         result.append(pos / float(sample["total"]))
     return result
 
-# Sample the fleshy part of the arm, not the shoulder joint which is
-# intentionally embedded in the body. Test each capsule cross section
-# against the measured side of the torso at the same height and depth.
-func arm_body_overlap(side: String, sign_side: float, surface: PackedVector3Array, forearm: bool) -> float:
-    var a := at(side + ("LowerArm" if forearm else "UpperArm"))
+# Compare the actual rendered arm surface to the actual rendered torso
+# at matching height/depth. The proximal sleeve is attached to the
+# shoulder; only the distal upper arm and free forearm are constrained.
+func arm_body_overlap(side: String, sign_side: float, forearm: bool) -> float:
+    var key := side + ("LowerArm" if forearm else "UpperArm")
+    var a := at(key)
     var b := at(side + ("Hand" if forearm else "LowerArm"))
-    var radius: float = arm_radii[side + ("LowerArm" if forearm else "UpperArm")] + BODY_MARGIN
+    var axis := b - a
     var center := at("hips")
     var overlap := 0.0
-    # The upper-arm endpoint already owns elbow clearance. A forearm
-    # rotation cannot move its elbow pivot; don't solve that point twice.
-    var fractions := [0.20, 0.40, 0.60, 0.80, 1.0] if forearm else [0.52, 0.68, 0.84, 1.0]
-    for fraction in fractions:
-        var p := a.lerp(b, float(fraction))
-        for cloth in surface:
-            if (cloth.x - center.x) * sign_side < 0.0:
-                continue
-            var dy := absf(p.y - cloth.y)
-            var dz := absf(p.z - cloth.z)
-            # Allow for the 18 mm sampling grid while retaining a curved
-            # capsule cross section rather than a full bounding box.
-            var cross_distance := Vector2(maxf(0.0, dy - 0.009), maxf(0.0, dz - 0.009)).length()
-            if cross_distance >= radius:
-                continue
-            var lateral := sqrt(maxf(0.0, radius * radius - cross_distance * cross_distance))
-            overlap = maxf(overlap, (cloth.x - p.x) * sign_side + lateral)
+    var evaluated := 0
+    for point in rendered_surface(arm_samples[key]):
+        var t := (point - a).dot(axis) / maxf(axis.length_squared(), 0.000001)
+        if t < (0.12 if forearm else 0.48) or t > 1.15:
+            continue
+        evaluated += 1
+        var cell := Vector2i(floori(point.y / BODY_CELL), floori(point.z / BODY_CELL))
+        for dy in range(-1, 2):
+            for dz in range(-1, 2):
+                var bucket: PackedVector3Array = torso_grid.get(cell + Vector2i(dy, dz), PackedVector3Array())
+                for cloth in bucket:
+                    if (cloth.x - center.x) * sign_side < 0.0:
+                        continue
+                    if absf(point.y - cloth.y) > 0.017 or absf(point.z - cloth.z) > 0.017:
+                        continue
+                    overlap = maxf(overlap, (cloth.x - point.x) * sign_side + BODY_MARGIN)
+    arm_evaluated_counts[key] = evaluated
     return overlap
 
 func rotate_forearm(side: String, sign_side: float, angle: float) -> void:
@@ -314,7 +259,7 @@ func rotate_forearm(side: String, sign_side: float, angle: float) -> void:
 func solve_arm_torso(delta: float, gait: RefCounted, holding: bool) -> void:
     if torso_samples.is_empty():
         return
-    var surface := skinned_surface(torso_samples)
+    refresh_torso_grid()
     last_torso_overlap = 0.0
     for side in ["left", "right"]:
         if holding and side == "right":
@@ -327,7 +272,7 @@ func solve_arm_torso(delta: float, gait: RefCounted, holding: bool) -> void:
         var shoulder_offset := maxf(0.0, float(torso_residual[side]) - delta * deg_to_rad(90.0))
         gait.abduct_chain(side, sign_side, shoulder_offset)
         for iteration in range(10):
-            var overlap := arm_body_overlap(side, sign_side, surface, false)
+            var overlap := arm_body_overlap(side, sign_side, false)
             if overlap <= 0.001 or shoulder_offset >= deg_to_rad(28.0):
                 break
             # Use the actual elbow lever arm and smaller corrections
@@ -340,14 +285,14 @@ func solve_arm_torso(delta: float, gait: RefCounted, holding: bool) -> void:
         var elbow_offset := maxf(0.0, float(forearm_residual[side]) - delta * deg_to_rad(55.0))
         rotate_forearm(side, sign_side, elbow_offset)
         for iteration in range(6):
-            var overlap := arm_body_overlap(side, sign_side, surface, true)
+            var overlap := arm_body_overlap(side, sign_side, true)
             if overlap <= 0.001 or elbow_offset >= deg_to_rad(20.0):
                 break
             var step := minf(deg_to_rad(20.0) - elbow_offset, clampf(overlap / 0.23, deg_to_rad(0.4), deg_to_rad(6.0)))
             rotate_forearm(side, sign_side, step)
             elbow_offset += step
         forearm_residual[side] = elbow_offset
-        last_torso_overlap = maxf(last_torso_overlap, maxf(arm_body_overlap(side, sign_side, surface, false), arm_body_overlap(side, sign_side, surface, true)))
+        last_torso_overlap = maxf(last_torso_overlap, maxf(arm_body_overlap(side, sign_side, false), arm_body_overlap(side, sign_side, true)))
 
 # Only compare against the local fabric patch next to each finger.
 # A whole-skirt bounding box would falsely report contact at the waist
@@ -543,10 +488,10 @@ func tick(delta: float, gait: RefCounted = null, holding: bool = false) -> void:
         solve_hand_skirt(delta, gait, holding)
         # Measure the final pose, not just the intermediate torso pass.
         # This includes any residual shoulder movement from skirt contact.
-        var surface := skinned_surface(torso_samples)
+        refresh_torso_grid()
         last_torso_overlap = 0.0
         for side in ["left", "right"]:
             if holding and side == "right":
                 continue
             var sign_side: float = gait.arm_sides[side]
-            last_torso_overlap = maxf(last_torso_overlap, maxf(arm_body_overlap(side, sign_side, surface, false), arm_body_overlap(side, sign_side, surface, true)))
+            last_torso_overlap = maxf(last_torso_overlap, maxf(arm_body_overlap(side, sign_side, false), arm_body_overlap(side, sign_side, true)))
