@@ -19,6 +19,7 @@ MODELS = {
     "facility.glb": ("https://cdn.3dassets.dev/assets/34733/v1/model.glb", 897836, None),
     "unit.glb": ("https://cdn.3dassets.dev/assets/34694/v1/model.glb", 26452, None),
     "shino.glb": ("https://raw.githubusercontent.com/madjin/vrm-samples/e16eb187100149a315ad92c3c9968f1d5baa6c7d/vroid/beta/Sendagaya_Shino.vrm", 15074328, "91f7c9e9ec990efb9de305e4c1d0e32a46498830"),
+    "directional_walk.glb": ("https://raw.githubusercontent.com/tilakpatell/tilakverse-assets/85064399bbdacc0e8cc50807179490314bc4ff1c/quaternius/universal-animation-library-2/Unreal-Godot/UAL2.glb", 20717364, "e6add803561a0491cd0b8db8b1dc75dc77b3bee1"),
     "locomotion.glb": ("https://raw.githubusercontent.com/call-me-sensei-app/toonlab/2e354c52e5539e33fb3d8f339645b47e1ac937ca/public/characters/mannequin.glb", 6670948, "82ee8dd0bf8007d40572e74c5c70bd4c65cc484d"),
 }
 for filename, (url, size, git_sha) in MODELS.items():
@@ -48,6 +49,27 @@ for filename, (url, size, git_sha) in MODELS.items():
     print(filename, len(data), "animations:", names)
 
     target = ASSETS / filename
+    if filename == "directional_walk.glb":
+        # Keep the authored eight-direction in-place walk cycles only.
+        required = {"walk_fwd_loop", "walk_bwd_loop", "walk_l_loop", "walk_r_loop",
+                    "walk_fwd_l_loop", "walk_fwd_r_loop", "walk_bwd_l_loop", "walk_bwd_r_loop"}
+        doc["animations"] = [clip for clip in doc["animations"] if clip.get("name", "").lower().split("|")[-1] in required]
+        actual = {clip.get("name", "").lower().split("|")[-1] for clip in doc["animations"]}
+        if actual != required:
+            raise RuntimeError("Directional locomotion clips missing: " + str(required - actual))
+        for clip in doc["animations"]:
+            clip["name"] = clip["name"].split("|")[-1]
+        payload = json.dumps(doc, separators=(",", ":")).encode("utf-8")
+        payload += b" " * ((-len(payload)) % 4)
+        rest = data[20 + length:]
+        intermediate = CACHE / "directional_walk_selected.glb"
+        intermediate.write_bytes(struct.pack("<4sIIII", b"glTF", 2, 20 + len(payload) + len(rest), len(payload), 0x4E4F534A) + payload + rest)
+        npx = shutil.which("npx.cmd" if __import__("os").name == "nt" else "npx")
+        if not npx:
+            raise RuntimeError("npx is required to prune unused animation data")
+        subprocess.run([npx, "--yes", "@gltf-transform/cli@4.5.1", "prune", str(intermediate), str(target)], check=True)
+        print("DIRECTIONAL_CLIPS", sorted(actual), "bytes:", target.stat().st_size)
+        continue
     if filename == "shino.glb":
         # VRM 0.x is a GLB container. Preserve the skin, textures, morphs and
         # fallback glTF materials; turn the explicit humanoid map into stable
@@ -59,6 +81,35 @@ for filename, (url, size, git_sha) in MODELS.items():
             raise RuntimeError("Shino has no VRM humanoid rig")
         for item in human:
             doc["nodes"][item["node"]]["name"] = "VRM_" + item["bone"]
+        # Preserve the source model's secondary-motion chain identities in
+        # ordinary glTF bone names. No runtime VRM extension parser required.
+        nodes = doc["nodes"]
+        human_ids = {item["node"] for item in human}
+        joints = {joint for skin in doc["skins"] for joint in skin["joints"]}
+        head = next(item["node"] for item in human if item["bone"] == "head")
+        def descendants(node):
+            yield node
+            for child in nodes[node].get("children", []):
+                yield from descendants(child)
+        head_children = set(descendants(head))
+        tagged = {}
+        for group in vrm.get("secondaryAnimation", {}).get("boneGroups", []):
+            for root in group.get("bones", []):
+                name = nodes[root].get("name", "").lower()
+                kind = "HAIR" if ("hair" in name or root in head_children) else "SKIRT" if ("skirt" in name or "bottom" in name) else ""
+                if kind:
+                    for idx in descendants(root):
+                        if idx in joints and idx not in human_ids:
+                            tagged[idx] = kind
+        for idx in joints - human_ids:
+            name = nodes[idx].get("name", "").lower()
+            if "hair" in name:
+                tagged[idx] = "HAIR"
+            elif "skirt" in name:
+                tagged[idx] = "SKIRT"
+        for idx, kind in tagged.items():
+            nodes[idx]["name"] = "SEC_" + kind + "_" + str(idx)
+        print("SHINO_SECONDARY", {kind: sum(v == kind for v in tagged.values()) for kind in ("HAIR", "SKIRT")})
         def remove_vrm(value):
             if isinstance(value, dict):
                 if "extensions" in value:

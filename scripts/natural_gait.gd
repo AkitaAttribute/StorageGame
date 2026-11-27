@@ -14,6 +14,7 @@ var ready := false
 var last_facing := Vector3.FORWARD
 var last_root := Vector3.ZERO
 var pelvis_offset := 0.0
+var skirt_half_width := 0.25
 
 func setup(retargeter: RefCounted, body: CharacterBody3D, visual_root: Node3D, avatar_root: Node3D, rest_y: float) -> void:
     rig = retargeter
@@ -78,13 +79,64 @@ func keep_arms_clear(holding: bool) -> void:
         var v := (common * (wrist - elbow)).normalized()
         var upper_z := clampf(u.z, -0.23, 0.23)
         var lower_z := clampf(v.z, upper_z - 0.05, upper_z + 0.18)
-        var upper_dir := Vector3(sign_side * 0.27, -1.0, upper_z).normalized()
-        var lower_dir := Vector3(sign_side * 0.19, -1.0, lower_z).normalized()
+        var upper_dir := Vector3(sign_side * 0.31, -1.0, upper_z).normalized()
+        var lower_dir := Vector3(sign_side * 0.24, -1.0, lower_z).normalized()
         rig.aim_arm_bone(upper, lower, common.inverse() * upper_dir, 1.0)
         rig.aim_arm_bone(lower, hand, common.inverse() * lower_dir, 1.0)
         # Neutral local wrist rather than a donor wrist rotated into the skirt.
         skeleton.set_bone_pose_rotation(hand, skeleton.get_bone_rest(hand).basis.get_rotation_quaternion())
         skeleton.force_update_all_bone_transforms()
+        constrain_hand(side, sign_side)
+
+# Solve the wrist against a character-local skirt envelope using real
+# measured arm lengths, rather than guessing a fixed shoulder angle.
+func constrain_hand(side: String, sign_side: float) -> void:
+    var upper: int = rig.target_keys[side + "UpperArm"]
+    var lower: int = rig.target_keys[side + "LowerArm"]
+    var hand: int = rig.target_keys[side + "Hand"]
+    var hips: int = rig.target_keys["hips"]
+    var shoulder := skeleton.get_bone_global_pose(upper).origin
+    var elbow := skeleton.get_bone_global_pose(lower).origin
+    var wrist := skeleton.get_bone_global_pose(hand).origin
+    var pelvis := visual.to_local(skeleton.to_global(skeleton.get_bone_global_pose(hips).origin))
+    var local_wrist := visual.to_local(skeleton.to_global(wrist))
+    var local_elbow := visual.to_local(skeleton.to_global(elbow))
+    # Include the extended hand/fingers, not just the wrist center.
+    var finger_tip := local_wrist + (local_wrist - local_elbow).normalized() * 0.095
+    var hand_low := minf(local_wrist.y, finger_tip.y)
+    var hand_high := maxf(local_wrist.y, finger_tip.y)
+    if hand_low > pelvis.y + 0.055 or hand_high < pelvis.y - 0.40:
+        return
+    var minimum := skirt_half_width + 0.045
+    var clearance := minf((local_wrist.x - pelvis.x) * sign_side, (finger_tip.x - pelvis.x) * sign_side)
+    if clearance >= minimum:
+        return
+    local_wrist.x += sign_side * (minimum - clearance)
+    var goal := skeleton.to_local(visual.to_global(local_wrist))
+    var upper_length := shoulder.distance_to(elbow)
+    var lower_length := elbow.distance_to(wrist)
+    if minf(upper_length, lower_length) < 0.0001:
+        return
+    var axis := goal - shoulder
+    if axis.length_squared() < 0.000001:
+        return
+    var distance := clampf(axis.length(), absf(upper_length - lower_length) + 0.001, (upper_length + lower_length) * 0.997)
+    axis = axis.normalized()
+    var pole := elbow - shoulder
+    pole -= axis * pole.dot(axis)
+    if pole.length_squared() < 0.00001:
+        var outward: Vector3 = rig.target_basis.inverse() * Vector3(sign_side, 0, -0.2)
+        pole = outward - axis * outward.dot(axis)
+    if pole.length_squared() < 0.00001:
+        return
+    var along := (upper_length * upper_length + distance * distance - lower_length * lower_length) / (2.0 * distance)
+    var bend := sqrt(maxf(0.0, upper_length * upper_length - along * along))
+    var knee := shoulder + axis * along + pole.normalized() * bend
+    rig.aim_arm_bone(upper, lower, knee - shoulder, 1.0)
+    var new_elbow := skeleton.get_bone_global_pose(lower).origin
+    rig.aim_arm_bone(lower, hand, shoulder + axis * distance - new_elbow, 1.0)
+    skeleton.set_bone_pose_rotation(hand, skeleton.get_bone_rest(hand).basis.get_rotation_quaternion())
+    skeleton.force_update_all_bone_transforms()
 
 func ground_at(point: Vector3) -> Dictionary:
     var query := PhysicsRayQueryParameters3D.create(point + Vector3.UP * 0.40, point - Vector3.UP * 0.55, 1, [player.get_rid()])

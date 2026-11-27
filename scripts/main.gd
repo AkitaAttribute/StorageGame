@@ -8,6 +8,8 @@ const AVATAR := "res://assets/shino.glb"
 const HumanoidRetarget = preload("res://scripts/humanoid_retarget.gd")
 const HouseholdProps = preload("res://scripts/household_props.gd")
 const NaturalGait = preload("res://scripts/natural_gait.gd")
+const SecondaryCollision = preload("res://scripts/secondary_collision.gd")
+const DIRECTIONAL_CHARACTER := "res://assets/directional_walk.glb"
 const SPEED := 3.4
 const ROLLUP_SCENE = preload("res://scenes/rollup_unit.tscn")
 const CHARACTER_HEIGHT := 1.7
@@ -43,6 +45,14 @@ var reference_unit_height := 2.4
 var rollup_unit: Node3D
 var household: HouseholdProps
 var natural_gait: NaturalGait
+var secondary_collision: SecondaryCollision
+var directional_animator: AnimationPlayer
+var directional_rig: HumanoidRetarget
+var direction_clips: Dictionary = {}
+var gait_clip: StringName = &""
+var gait_directional := false
+var gait_blend := 1.0
+var gait_from: Dictionary = {}
 var force_pose_weight := 0.0
 var force_target := Vector3.ZERO
 var state: Dictionary = {}
@@ -148,7 +158,7 @@ func named_animation(ap: AnimationPlayer, needle: String) -> StringName:
 func start_game(data: Dictionary) -> void:
     if is_instance_valid(world):
         return
-    for path in [FACILITY, UNIT, CHARACTER, AVATAR, "res://assets/prop_fridge.glb", "res://assets/prop_desk.glb", "res://assets/prop_screwdriver.glb", "res://assets/prop_boombox.glb"]:
+    for path in [FACILITY, UNIT, CHARACTER, AVATAR, DIRECTIONAL_CHARACTER, "res://assets/prop_fridge.glb", "res://assets/prop_desk.glb", "res://assets/prop_screwdriver.glb", "res://assets/prop_boombox.glb"]:
         if not (ResourceLoader.load(path) is PackedScene):
             OS.alert("Run python tools/fetch_assets.py and import the project first.", "Missing model assets")
             return
@@ -257,6 +267,23 @@ func start_game(data: Dictionary) -> void:
     if avatar_ready:
         natural_gait = NaturalGait.new()
         natural_gait.setup(retargeter, player, visual, avatar_model, avatar_base_y)
+        secondary_collision = SecondaryCollision.new()
+        secondary_collision.setup(retargeter, visual)
+        natural_gait.skirt_half_width = secondary_collision.skirt_half_width
+        var directional_donor := model(DIRECTIONAL_CHARACTER, visual)
+        directional_donor.visible = false
+        directional_rig = HumanoidRetarget.new()
+        if directional_rig.setup(directional_donor, avatar, visual):
+            directional_animator = animation_in(directional_donor)
+            if directional_animator != null:
+                directional_animator.callback_mode_process = AnimationMixer.ANIMATION_CALLBACK_MODE_PROCESS_MANUAL
+                for suffix in ["fwd", "fwd_l", "l", "bwd_l", "bwd", "bwd_r", "r", "fwd_r"]:
+                    var expected := "walk_" + str(suffix) + "_loop"
+                    for clip in directional_animator.get_animation_list():
+                        if str(clip).to_lower().get_file() == expected:
+                            direction_clips[suffix] = clip
+                            directional_animator.get_animation(clip).loop_mode = Animation.LOOP_LINEAR
+                print("DIRECTIONAL_RIG ", direction_clips.keys())
     camera = Camera3D.new()
     camera.fov = 65
     camera.near = 0.035
@@ -607,7 +634,12 @@ func _physics_process(delta: float) -> void:
     if not is_instance_valid(player):
         return
     var input := Input.get_vector("move_left", "move_right", "move_up", "move_down")
-    var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw)
+    # Forward speed is unchanged. Backpedal and strafe use shorter,
+    # more cautious steps, including smoothly interpolated diagonals.
+    var speed_factor := lerpf(1.0, 0.68, absf(input.x))
+    if input.y > 0.0:
+        speed_factor = lerpf(speed_factor, 0.58, input.y)
+    var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw) * speed_factor
     if is_instance_valid(rollup_unit):
         direction = rollup_unit.filter_player_motion(player, direction, PLAYER_CAPSULE_HEIGHT, PLAYER_CAPSULE_RADIUS)
     var grounded := player.is_on_floor() or stepped_last_frame
@@ -649,22 +681,15 @@ func _physics_process(delta: float) -> void:
         if facing.length_squared() > 0.01:
             visual.rotation.y = rotate_toward(visual.rotation.y, atan2(facing.x, facing.z), deg_to_rad(420.0) * delta)
     elif direction.length() > 0.05:
-        visual.rotation.y = rotate_toward(visual.rotation.y, atan2(direction.x, direction.z), deg_to_rad(420.0) * delta)
+        # Keep facing the view while moving sideways or backwards, but
+        # preserve free camera orbit without rotating an idle character.
+        visual.rotation.y = rotate_toward(visual.rotation.y, camera_yaw + PI, deg_to_rad(420.0) * delta)
     if animator != null:
         var displacement := player.position - previous_position
         var ground_speed := Vector2(displacement.x, displacement.z).length() / maxf(delta, 0.001)
-        var clip := walk if ground_speed > 0.08 and direction.length() > 0.05 else idle
-        if clip != &"" and animator.current_animation != clip:
-            animator.play(clip, 0.22)
-        var playback := 1.0
-        if clip == walk:
-            # Walk cadence remains walk-like even at the existing maximum
-            # gameplay speed. Do not turn a full joystick deflection into sprint.
-            var cycle := lerpf(1.35, 1.02, clampf(ground_speed / SPEED, 0.0, 1.0))
-            playback = clampf(animator.get_animation(walk).length / cycle, 0.25, 1.05)
-        animator.advance(delta * playback)
+        var moving := ground_speed > 0.08 and direction.length() > 0.05
         if avatar_ready:
-            retargeter.apply_pose()
+            animate_directional(delta, displacement / maxf(delta, 0.001), moving)
             if natural_gait != null and natural_gait.ready:
                 var holding_prop := is_instance_valid(household) and is_instance_valid(household.held)
                 natural_gait.tick(delta, displacement / maxf(delta, 0.001), player.is_on_floor() or stepped_last_frame, holding_prop)
@@ -682,6 +707,8 @@ func _physics_process(delta: float) -> void:
         force_pose_weight = move_toward(force_pose_weight, 1.0 if holding else 0.0, delta * 6.0)
         if avatar_ready and force_pose_weight > 0.0:
             retargeter.apply_force_pose(force_target, force_pose_weight)
+    if secondary_collision != null:
+        secondary_collision.tick(delta)
     update_nearby()
     if Input.is_action_just_pressed("use"):
         use_nearby()
@@ -689,6 +716,59 @@ func _physics_process(delta: float) -> void:
     if save_clock >= 2.0:
         save_clock = 0
         save_game()
+
+# Direction classification occurs in the character's own anatomical
+# coordinate space, not global axes or camera pitch.
+func gait_suffix(local_velocity: Vector3) -> String:
+    var left_sign := 1.0
+    if avatar_ready:
+        var left_bone: int = retargeter.target_keys["leftUpperLeg"]
+        var right_bone: int = retargeter.target_keys["rightUpperLeg"]
+        var left_axis: Vector3 = retargeter.target_basis * (retargeter.target.get_bone_global_rest(left_bone).origin - retargeter.target.get_bone_global_rest(right_bone).origin)
+        left_sign = signf(left_axis.x)
+    var heading := atan2(local_velocity.x * left_sign, local_velocity.z)
+    var sector := posmod(roundi(heading / (PI / 4.0)), 8)
+    return ["fwd", "fwd_l", "l", "bwd_l", "bwd", "bwd_r", "r", "fwd_r"][sector]
+
+func animate_directional(delta: float, velocity: Vector3, moving: bool) -> void:
+    var suffix := gait_suffix(visual.global_transform.basis.inverse() * velocity) if moving else ""
+    var use_directional := moving and suffix != "fwd" and direction_clips.has(suffix)
+    var ap := directional_animator if use_directional else animator
+    var active_rig := directional_rig if use_directional else retargeter
+    var clip: StringName = direction_clips[suffix] if use_directional else (walk if moving else idle)
+    if clip == &"" or ap == null:
+        return
+    if clip != gait_clip or use_directional != gait_directional:
+        var old_ap := directional_animator if gait_directional else animator
+        var phase := 0.0
+        if old_ap != null and gait_clip != &"" and old_ap.has_animation(gait_clip) and moving and gait_clip != idle:
+            phase = fposmod(old_ap.current_animation_position / maxf(old_ap.get_animation(gait_clip).length, 0.001), 1.0)
+        gait_from.clear()
+        for bone in retargeter.target_keys.values():
+            gait_from[bone] = retargeter.target.get_bone_pose_rotation(bone)
+        gait_blend = 0.0
+        gait_clip = clip
+        gait_directional = use_directional
+        ap.play(clip)
+        ap.advance(0.0)
+        if moving:
+            ap.seek(phase * ap.get_animation(clip).length, true)
+    var speed := Vector2(velocity.x, velocity.z).length()
+    var playback := 1.0
+    if moving:
+        var cycle := lerpf(1.35, 1.02, clampf(speed / SPEED, 0.0, 1.0))
+        if use_directional:
+            cycle = lerpf(1.30, 1.05, clampf(speed / (SPEED * 0.68), 0.0, 1.0))
+        playback = clampf(ap.get_animation(clip).length / cycle, 0.25, 1.15)
+    ap.advance(delta * playback)
+    active_rig.apply_pose()
+    gait_blend = minf(1.0, gait_blend + delta / 0.22)
+    if gait_blend < 1.0:
+        var weight := smoothstep(0.0, 1.0, gait_blend)
+        for bone in gait_from:
+            var from_pose: Quaternion = gait_from[bone]
+            retargeter.target.set_bone_pose_rotation(bone, from_pose.slerp(retargeter.target.get_bone_pose_rotation(bone), weight))
+        retargeter.target.force_update_all_bone_transforms()
 
 func update_nearby() -> void:
     if is_instance_valid(household) and household.has_panel_action():
@@ -802,6 +882,25 @@ func _smoke() -> void:
         push_error("Footstep-driven gait did not initialize")
         get_tree().quit(1)
         return
+    if direction_clips.size() != 8 or directional_rig == null or secondary_collision == null or secondary_collision.groups["HAIR"].is_empty():
+        push_error("Directional animation or hair rig failed to initialize")
+        get_tree().quit(1)
+        return
+    # Verify directions classify distinctly and authored clips actually
+    # animate the target's thigh. No rendering-dependent assertions.
+    var smoke_thigh: int = retargeter.target_keys["leftUpperLeg"]
+    var back_clip: StringName = direction_clips["bwd"]
+    directional_animator.play(back_clip)
+    directional_animator.advance(0.0)
+    directional_rig.apply_pose()
+    var backward_before := retargeter.target.get_bone_pose_rotation(smoke_thigh)
+    directional_animator.advance(0.25)
+    directional_rig.apply_pose()
+    if backward_before.angle_to(retargeter.target.get_bone_pose_rotation(smoke_thigh)) < 0.01 or gait_suffix(Vector3(0, 0, -1)) != "bwd" or gait_suffix(Vector3(1, 0, 0)) not in ["l", "r"]:
+        push_error("Directional locomotion retarget regression")
+        get_tree().quit(1)
+        return
+    print("DIRECTIONAL_SMOKE_PASS")
     var prop_wait := 0
     while not household.placement_complete and prop_wait < 120:
         await get_tree().physics_frame
