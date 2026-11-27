@@ -14,7 +14,7 @@ var ready := false
 var last_facing := Vector3.FORWARD
 var last_root := Vector3.ZERO
 var pelvis_offset := 0.0
-var skirt_half_width := 0.25
+var skirt_half_width := 0.20
 
 func setup(retargeter: RefCounted, body: CharacterBody3D, visual_root: Node3D, avatar_root: Node3D, rest_y: float) -> void:
     rig = retargeter
@@ -51,12 +51,16 @@ func limit_torso() -> void:
         var bone: int = rig.target_keys[key]
         var rest := skeleton.get_bone_global_rest(bone).basis.orthonormalized()
         var pose := skeleton.get_bone_global_pose(bone).basis.orthonormalized()
-        var rest_q := rest.get_rotation_quaternion()
-        var pose_q := pose.get_rotation_quaternion()
+        # Limit forward lean/roll independently of yaw. The old total-angle
+        # clamp also suppressed the hip rotation needed for natural walking.
+        var common: Basis = rig.target_basis
+        var relative := common * pose * rest.inverse() * common.inverse()
+        var euler := relative.get_euler()
         var maximum := deg_to_rad(5.0 if key == "hips" else 8.0)
-        var angle := rest_q.angle_to(pose_q)
-        if angle > maximum:
-            set_global_rotation(bone, Basis(rest_q.slerp(pose_q, maximum / angle)), 1.0)
+        euler.x = clampf(euler.x, -maximum, maximum)
+        euler.z = clampf(euler.z, -maximum, maximum)
+        euler.y = clampf(euler.y, -deg_to_rad(18.0), deg_to_rad(18.0))
+        set_global_rotation(bone, common.inverse() * Basis.from_euler(euler) * common * rest, 1.0)
 
 func keep_arms_clear(holding: bool) -> void:
     var common: Basis = rig.target_basis
@@ -77,10 +81,12 @@ func keep_arms_clear(holding: bool) -> void:
         # for this character's skirt and a limited, relaxed elbow bend.
         var u := (common * (elbow - shoulder)).normalized()
         var v := (common * (wrist - elbow)).normalized()
-        var upper_z := clampf(u.z, -0.23, 0.23)
-        var lower_z := clampf(v.z, upper_z - 0.05, upper_z + 0.18)
-        var upper_dir := Vector3(sign_side * 0.31, -1.0, upper_z).normalized()
-        var lower_dir := Vector3(sign_side * 0.24, -1.0, lower_z).normalized()
+        # Retain the authored sagittal swing and elbow flexion. At rest the
+        # arms hang almost vertically; clearance is a correction, not a pose.
+        var upper_z := clampf(u.z / maxf(absf(u.y), 0.40), -0.48, 0.48)
+        var lower_z := clampf(v.z / maxf(absf(v.y), 0.35), upper_z - 0.14, upper_z + 0.45)
+        var upper_dir := Vector3(sign_side * 0.09, -1.0, upper_z).normalized()
+        var lower_dir := Vector3(sign_side * 0.04, -1.0, lower_z).normalized()
         rig.aim_arm_bone(upper, lower, common.inverse() * upper_dir, 1.0)
         rig.aim_arm_bone(lower, hand, common.inverse() * lower_dir, 1.0)
         # Neutral local wrist rather than a donor wrist rotated into the skirt.
@@ -107,11 +113,28 @@ func constrain_hand(side: String, sign_side: float) -> void:
     var hand_high := maxf(local_wrist.y, finger_tip.y)
     if hand_low > pelvis.y + 0.055 or hand_high < pelvis.y - 0.40:
         return
-    var minimum := skirt_half_width + 0.045
-    var clearance := minf((local_wrist.x - pelvis.x) * sign_side, (finger_tip.x - pelvis.x) * sign_side)
-    if clearance >= minimum:
+    # Taper the skirt from waist to hem and evaluate the hand at its
+    # actual height/depth. The skirt bones can yield slightly to contact;
+    # do not force both arms beyond the widest hem at all times.
+    var correction := 0.0
+    for sample in [local_wrist, local_wrist.lerp(finger_tip, 0.5), finger_tip]:
+        var point: Vector3 = sample
+        var down := pelvis.y - point.y
+        if down < -0.055 or down > 0.36:
+            continue
+        var width := lerpf(skirt_half_width * 0.63, skirt_half_width, clampf(down / 0.30, 0.0, 1.0))
+        var depth := absf(point.z - pelvis.z)
+        var depth_radius := lerpf(0.105, 0.165, clampf(down / 0.30, 0.0, 1.0))
+        if depth >= depth_radius + 0.028:
+            continue
+        var ellipse := sqrt(maxf(0.0, 1.0 - pow(depth / (depth_radius + 0.028), 2.0)))
+        var minimum := width * ellipse + 0.019
+        var clearance := (point.x - pelvis.x) * sign_side
+        correction = maxf(correction, minimum - clearance)
+    if correction <= 0.0:
         return
-    local_wrist.x += sign_side * (minimum - clearance)
+    local_wrist.x += sign_side * correction
+    local_wrist.y += minf(0.025, correction * 0.25)
     var goal := skeleton.to_local(visual.to_global(local_wrist))
     var upper_length := shoulder.distance_to(elbow)
     var lower_length := elbow.distance_to(wrist)

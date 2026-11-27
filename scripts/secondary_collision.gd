@@ -6,7 +6,7 @@ var rig: RefCounted
 var visual: Node3D
 var groups: Dictionary = {"HAIR": [], "SKIRT": []}
 var last_pose: Dictionary = {}
-var skirt_half_width := 0.25
+var skirt_half_width := 0.0
 
 func setup(retargeter: RefCounted, root: Node3D) -> void:
     rig = retargeter
@@ -21,8 +21,8 @@ func setup(retargeter: RefCounted, root: Node3D) -> void:
     var hips: int = rig.target_keys["hips"]
     var pelvis := common_rest(hips)
     for i in groups["SKIRT"]:
-        skirt_half_width = maxf(skirt_half_width, absf(common_rest(i).x - pelvis.x) + 0.04)
-    skirt_half_width = clampf(skirt_half_width, 0.23, 0.34)
+        skirt_half_width = maxf(skirt_half_width, absf(common_rest(i).x - pelvis.x) + 0.025)
+    skirt_half_width = clampf(skirt_half_width, 0.17, 0.26)
     print("SECONDARY_COLLISION hair=", groups["HAIR"].size(), " skirt=", groups["SKIRT"].size(), " skirt_width=", skirt_half_width)
 
 func common_rest(bone: int) -> Vector3:

@@ -639,11 +639,12 @@ func _physics_process(delta: float) -> void:
     if not is_instance_valid(player):
         return
     var input := Input.get_vector("move_left", "move_right", "move_up", "move_down")
-    # Forward speed is unchanged. Backpedal and strafe use shorter,
-    # more cautious steps, including smoothly interpolated diagonals.
-    var speed_factor := lerpf(1.0, 0.68, absf(input.x))
-    if input.y > 0.0:
-        speed_factor = lerpf(speed_factor, 0.58, input.y)
+    # Sideways input normally turns the body and becomes a forward walk.
+    # Rearward input keeps the successful dedicated backpedal behavior.
+    var backpedal := is_backpedal(input)
+    var speed_factor := 1.0
+    if backpedal:
+        speed_factor = lerpf(1.0, 0.58, input.y)
     var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw) * speed_factor
     if is_instance_valid(rollup_unit):
         direction = rollup_unit.filter_player_motion(player, direction, PLAYER_CAPSULE_HEIGHT, PLAYER_CAPSULE_RADIUS)
@@ -686,15 +687,23 @@ func _physics_process(delta: float) -> void:
         if facing.length_squared() > 0.01:
             visual.rotation.y = rotate_toward(visual.rotation.y, atan2(facing.x, facing.z), deg_to_rad(420.0) * delta)
     elif direction.length() > 0.05:
-        # Keep facing the view while moving sideways or backwards, but
-        # preserve free camera orbit without rotating an idle character.
-        visual.rotation.y = rotate_toward(visual.rotation.y, camera_yaw + PI, deg_to_rad(420.0) * delta)
+        # Turn hips and shoulders into normal travel immediately. Only
+        # intentional backward motion keeps facing camera-forward.
+        var facing_yaw := travel_yaw(direction, backpedal)
+        visual.rotation.y = rotate_toward(visual.rotation.y, facing_yaw, deg_to_rad(780.0) * delta)
     if animator != null:
         var displacement := player.position - previous_position
         var ground_speed := Vector2(displacement.x, displacement.z).length() / maxf(delta, 0.001)
         var moving := ground_speed > 0.08 and direction.length() > 0.05
         if avatar_ready:
-            animate_directional(delta, displacement / maxf(delta, 0.001), moving)
+            var holding_direction := is_instance_valid(household) and is_instance_valid(household.held)
+            var animation_velocity := displacement / maxf(delta, 0.001)
+            var requested_suffix := ""
+            if moving and not holding_direction:
+                # Choose the requested gait at input change, not after the
+                # character completes its turn. Preserve phase across clips.
+                requested_suffix = gait_suffix(Basis(Vector3.UP, camera_yaw + PI).inverse() * direction) if backpedal else "fwd"
+            animate_directional(delta, animation_velocity, moving, requested_suffix)
             if natural_gait != null and natural_gait.ready:
                 var holding_prop := is_instance_valid(household) and is_instance_valid(household.held)
                 natural_gait.tick(delta, displacement / maxf(delta, 0.001), player.is_on_floor() or stepped_last_frame, holding_prop)
@@ -735,8 +744,16 @@ func gait_suffix(local_velocity: Vector3) -> String:
     var sector := posmod(roundi(heading / (PI / 4.0)), 8)
     return ["fwd", "fwd_l", "l", "bwd_l", "bwd", "bwd_r", "r", "fwd_r"][sector]
 
-func animate_directional(delta: float, velocity: Vector3, moving: bool) -> void:
+func is_backpedal(input: Vector2) -> bool:
+    return input.y > 0.35 and input.y >= absf(input.x) * 0.80
+
+func travel_yaw(direction: Vector3, backpedal: bool) -> float:
+    return camera_yaw + PI if backpedal else atan2(direction.x, direction.z)
+
+func animate_directional(delta: float, velocity: Vector3, moving: bool, requested_suffix: String = "") -> void:
     var suffix := gait_suffix(visual.global_transform.basis.inverse() * velocity) if moving else ""
+    if moving and not requested_suffix.is_empty():
+        suffix = requested_suffix
     var use_directional := moving and suffix != "fwd" and direction_clips.has(suffix)
     var ap := directional_animator if use_directional else animator
     var active_rig := directional_rig if use_directional else retargeter
@@ -767,7 +784,7 @@ func animate_directional(delta: float, velocity: Vector3, moving: bool) -> void:
         playback = clampf(ap.get_animation(clip).length / cycle, 0.25, 1.15)
     ap.advance(delta * playback)
     active_rig.apply_pose()
-    gait_blend = minf(1.0, gait_blend + delta / 0.22)
+    gait_blend = minf(1.0, gait_blend + delta / 0.12)
     if gait_blend < 1.0:
         var weight := smoothstep(0.0, 1.0, gait_blend)
         for bone in gait_from:
@@ -903,6 +920,12 @@ func _smoke() -> void:
     directional_rig.apply_pose()
     if backward_before.angle_to(retargeter.target.get_bone_pose_rotation(smoke_thigh)) < 0.01 or gait_suffix(Vector3(0, 0, -1)) != "bwd" or gait_suffix(Vector3(1, 0, 0)) not in ["l", "r"]:
         push_error("Directional locomotion retarget regression")
+        get_tree().quit(1)
+        return
+    # Normal lateral travel turns the hips into the new heading, while
+    # deliberate rearward input retains the authored backward walk.
+    if is_backpedal(Vector2.RIGHT) or not is_backpedal(Vector2.DOWN) or absf(angle_difference(travel_yaw(Vector3.RIGHT, false), PI * 0.5)) > 0.001 or absf(angle_difference(travel_yaw(Vector3.BACK, true), camera_yaw + PI)) > 0.001:
+        push_error("Direction-change facing regression")
         get_tree().quit(1)
         return
     print("DIRECTIONAL_SMOKE_PASS")
