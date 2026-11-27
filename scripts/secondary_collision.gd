@@ -62,8 +62,12 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
         # skeleton's rest transforms. Fit a transverse section of the
         # strongly weighted vertex cloud if absolute joint alignment is
         # unavailable. This still measures actual mesh thickness.
-        if observations.size() < 5:
-            observations = fit_weighted_radius(str(key))
+        # A sleeve can be wider than the elbow and the upper arm is
+        # tested only over its distal half. Use local cross sections
+        # rather than one radius for the entire weighted vertex cloud.
+        var fitted := fit_weighted_radius(str(key))
+        if fitted.size() >= 5:
+            observations = fitted
         observations.sort()
         arm_radius_counts[key] = observations.size()
         var fallback := 0.030 if str(key).ends_with("UpperArm") else 0.025
@@ -182,31 +186,71 @@ func fit_weighted_radius(key: String) -> Array:
     var start: Vector3 = segment[0]
     var finish: Vector3 = segment[1]
     var axis := (finish - start).normalized()
-    var projections: Array[float] = []
-    for point in points:
-        var p: Vector3 = point
-        projections.append((p - start).dot(axis))
-    projections.sort()
-    var lo := projections[int(projections.size() * 0.20)]
-    var hi := projections[mini(projections.size() - 1, int(projections.size() * 0.80))]
-    var radial_points: Array[Vector3] = []
+    # Fit the longitudinal axis from the actual weighted surface. A
+    # small bind/rest axis mismatch otherwise inflates all radii.
     var center := Vector3.ZERO
     for point in points:
         var p: Vector3 = point
-        var along := (p - start).dot(axis)
-        if along < lo or along > hi:
+        center += p
+    center /= float(points.size())
+    var fitted_axis := axis
+    for iteration in range(10):
+        var next := Vector3.ZERO
+        for point in points:
+            var offset: Vector3 = point - center
+            next += offset * offset.dot(fitted_axis)
+        if next.length_squared() < 0.000001:
+            break
+        fitted_axis = next.normalized()
+    if fitted_axis.dot(axis) < 0.0:
+        fitted_axis = -fitted_axis
+    # Keep the rig's anatomical direction if a wide sleeve dominates
+    # covariance and makes the fitted axis nearly perpendicular.
+    if fitted_axis.dot(axis) < 0.70:
+        fitted_axis = axis
+    var ordered: Array[Dictionary] = []
+    for point in points:
+        var p: Vector3 = point
+        ordered.append({"point": p, "along": (p - center).dot(fitted_axis)})
+    ordered.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return float(a["along"]) < float(b["along"]))
+    var estimates: Array[float] = []
+    var sample_count := 0
+    # Upper-arm collisions cover the lower half, beyond the sleeve
+    # attachment. Forearm thickness tapers, so use the proximal/middle
+    # sections, not the hand/wrist transition.
+    var first := 4 if key.ends_with("UpperArm") else 1
+    var last := 7 if key.ends_with("UpperArm") else 6
+    for section in range(first, last):
+        var lo := int(float(ordered.size()) * float(section) / 8.0)
+        var hi := int(float(ordered.size()) * float(section + 1) / 8.0)
+        if hi - lo < 5:
             continue
-        var radial := p - start - axis * along
-        radial_points.append(radial)
-        center += radial
-    if radial_points.size() < 5:
+        var radial_center := Vector3.ZERO
+        var radial_points: Array[Vector3] = []
+        for i in range(lo, hi):
+            var p: Vector3 = ordered[i]["point"]
+            var relative := p - center
+            var radial := relative - fitted_axis * relative.dot(fitted_axis)
+            radial_center += radial
+            radial_points.append(radial)
+        radial_center /= float(radial_points.size())
+        var distances: Array[float] = []
+        for radial in radial_points:
+            distances.append(radial.distance_to(radial_center))
+        distances.sort()
+        estimates.append(distances[mini(distances.size() - 1, int(distances.size() * 0.90))])
+        sample_count += distances.size()
+    if estimates.is_empty():
         return []
-    center /= float(radial_points.size())
-    var distances: Array = []
-    for radial in radial_points:
-        distances.append(radial.distance_to(center))
-    print("ARM_RADIUS_CROSS_SECTION ", key, " count=", distances.size(), " axial_range=", hi - lo)
-    return distances
+    estimates.sort()
+    var typical: float = estimates[int(estimates.size() / 2)]
+    # Replicate the robust cross-section estimate for the setup code's
+    # existing percentile selection; counts still represent real samples.
+    var result: Array = []
+    result.resize(sample_count)
+    result.fill(typical)
+    print("ARM_RADIUS_SECTIONS ", key, " radii=", estimates, " median=", typical, " samples=", sample_count)
+    return result
 
 func skirt_surface() -> PackedVector3Array:
     return skinned_surface(skirt_samples)
