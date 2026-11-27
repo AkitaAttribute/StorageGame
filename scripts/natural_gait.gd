@@ -225,8 +225,8 @@ func calibrate_arm_pose() -> void:
             arm_previous[bone] = arm_neutral[bone]
         # A separate relaxed idle pose: elbows hang near the ribs and
         # hands rest against the skirt rather than clearing its widest hem.
-        rig.aim_arm_bone(upper, lower, common.inverse() * Vector3(sign_side * 0.075, -1.0, -0.025), 1.0)
-        rig.aim_arm_bone(lower, hand, common.inverse() * Vector3(sign_side * 0.05, -1.0, 0.13), 1.0)
+        rig.aim_arm_bone(upper, lower, common.inverse() * Vector3(sign_side * 0.20, -1.0, -0.075), 1.0)
+        rig.aim_arm_bone(lower, hand, common.inverse() * Vector3(sign_side * 0.025, -1.0, 0.15), 1.0)
         stabilize_hand(side, sign_side)
         for bone in [upper, lower, hand]:
             idle_neutral[bone] = skeleton.get_bone_pose_rotation(bone)
@@ -299,6 +299,28 @@ func prepare_arm_clip(state: String, ap: AnimationPlayer, clip: StringName, dono
                 skeleton.set_bone_pose_rotation(bone, rotation)
                 base[bone] = rotation
             skeleton.force_update_all_bone_transforms()
+            if not moving:
+                # Keep elbows just outside the shoulder line in the baked
+                # idle pose. Preserve the wrist target when correcting the
+                # elbow; do not rotate the entire arm away from the hip.
+                var upper: int = rig.target_keys[side + "UpperArm"]
+                var lower: int = rig.target_keys[side + "LowerArm"]
+                var hand: int = rig.target_keys[side + "Hand"]
+                var common: Basis = rig.target_basis
+                var axis := common * (skeleton.get_bone_global_pose(lower).origin - skeleton.get_bone_global_pose(upper).origin)
+                var down := maxf(0.001, -axis.y)
+                var lateral := axis.x * sign_side / down
+                if lateral < 0.18 or lateral > 0.30:
+                    var wrist := skeleton.get_bone_global_pose(hand).origin
+                    axis.x = sign_side * down * clampf(lateral, 0.18, 0.30)
+                    rig.aim_arm_bone(upper, lower, common.inverse() * axis, 1.0)
+                    var forearm := common * (wrist - skeleton.get_bone_global_pose(lower).origin)
+                    # Avoid overcompensating with an inward-folded forearm.
+                    var forearm_down := maxf(0.001, -forearm.y)
+                    forearm.x = sign_side * clampf(forearm.x * sign_side, -0.08 * forearm_down, 0.20 * forearm_down)
+                    rig.aim_arm_bone(lower, hand, common.inverse() * forearm, 1.0)
+                    base[upper] = skeleton.get_bone_pose_rotation(upper)
+                    base[lower] = skeleton.get_bone_pose_rotation(lower)
             # Solve garment clearance on prepared keyframes, not in the
             # live animation graph. Record the minimal extra abduction.
             var applied := 0.0

@@ -1021,6 +1021,7 @@ func _smoke() -> void:
     var idle_overlap := 0.0
     var idle_compression := 0.0
     var idle_abduction := 0.0
+    var idle_min_abduction := 90.0
     for frame in range(120):
         animator.advance(1.0 / 60.0)
         retargeter.apply_pose()
@@ -1037,8 +1038,14 @@ func _smoke() -> void:
                 var upper: int = retargeter.target_keys[side + "UpperArm"]
                 var lower: int = retargeter.target_keys[side + "LowerArm"]
                 var axis := retargeter.target_basis * (retargeter.target.get_bone_global_pose(lower).origin - retargeter.target.get_bone_global_pose(upper).origin)
-                idle_abduction = maxf(idle_abduction, rad_to_deg(atan2(absf(axis.x), maxf(0.001, -axis.y))))
-    print("FK_IDLE wrist_deviation=", idle_wrist_max, " deformed_clearance_overlap=", idle_overlap, " skirt_compression=", idle_compression, " abduction=", idle_abduction)
+                var signed_abduction := rad_to_deg(atan2(axis.x * float(natural_gait.arm_sides[side]), maxf(0.001, -axis.y)))
+                idle_abduction = maxf(idle_abduction, signed_abduction)
+                idle_min_abduction = minf(idle_min_abduction, signed_abduction)
+    print("FK_IDLE wrist_deviation=", idle_wrist_max, " deformed_clearance_overlap=", idle_overlap, " skirt_compression=", idle_compression, " abduction=", idle_abduction, " min_abduction=", idle_min_abduction)
+    if idle_min_abduction < 5.0 or idle_abduction > 30.0:
+        push_error("Idle elbow leaves relaxed outward shoulder envelope")
+        get_tree().quit(1)
+        return
     if natural_gait.arm_clips.size() != 3 or secondary_collision.skirt_samples.is_empty() or idle_overlap > 0.025:
         push_error("Prepared idle arm layer missing or exceeds skirt clearance")
         get_tree().quit(1)
