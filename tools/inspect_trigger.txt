@@ -1,0 +1,1 @@
+Run pinned source asset inspection.
