@@ -1880,6 +1880,10 @@ func _wardrobe_visual() -> void:
     set_physics_process(false)
     set_process(false)
     hud.hide()
+    # Isolate the avatar from facility walls for every verification angle.
+    for child in world.get_children():
+        if child is Node3D and child != player and child != camera and not child is Light3D:
+            (child as Node3D).hide()
     var output := "/tmp/storage-wardrobe-visual"
     DirAccess.make_dir_recursive_absolute(output)
     camera.fov = 37.0
@@ -1913,6 +1917,14 @@ func _wardrobe_visual() -> void:
                 var width := frame_image.get_width()
                 var height := frame_image.get_height()
                 var cropped := frame_image.get_region(Rect2i(int(width*0.30),0,int(width*0.40),height))
+                var colors: Dictionary = {}
+                for py in range(0,cropped.get_height(),12):
+                    for px in range(0,cropped.get_width(),12):
+                        colors[cropped.get_pixel(px,py).to_rgba32()] = true
+                if colors.size() < 20:
+                    push_error("Blank or obscured wardrobe view: "+top_id+"/"+bottom_id+" "+view)
+                    get_tree().quit(1)
+                    return
                 var filename := output.path_join(top_id+"_"+bottom_id+"_"+pose+"_"+view+".png")
                 if cropped.save_png(filename) != OK:
                     get_tree().quit(1)
