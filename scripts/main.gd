@@ -966,12 +966,17 @@ func _smoke() -> void:
         push_error("Directional animation or hair rig failed to initialize")
         get_tree().quit(1)
         return
-    # A segment can cross a body proxy even when its endpoint is clear.
-    var hair_probe := secondary_collision.hair_link_correction(Vector3(-0.2, 0, 0), Vector3(0.2, 0, 0), [[Vector3(0, -0.1, 0), Vector3(0, 0.1, 0), 0.08]], Vector3.BACK)
-    if hair_probe.length() < 0.02:
-        push_error("Hair segment midpoint collision was missed")
+    # The visually preferred Build 40 hair solver uses exactly five
+    # collision proxies and leaves a non-contacting point unchanged.
+    var hair_volumes := secondary_collision.colliders("HAIR")
+    var hair_clear := Vector3(0.2, 0, 0)
+    var hair_free: Vector3 = secondary_collision.outside_capsule(hair_clear, Vector3(0, -0.1, 0), Vector3(0, 0.1, 0), 0.08, Vector3.BACK)
+    var hair_contact: Vector3 = secondary_collision.outside_capsule(Vector3(0.04, 0, 0), Vector3(0, -0.1, 0), Vector3(0, 0.1, 0), 0.08, Vector3.BACK)
+    if hair_volumes.size() != 5 or not hair_free.is_equal_approx(hair_clear) or not hair_contact.is_equal_approx(Vector3(0.08, 0, 0)):
+        push_error("Original localized hair capsule behavior changed")
         get_tree().quit(1)
         return
+    print("ORIGINAL_HAIR_CONTACT_PASS")
     # Verify directions classify distinctly and authored clips actually
     # animate the target's thigh. No rendering-dependent assertions.
     var smoke_thigh: int = retargeter.target_keys["leftUpperLeg"]

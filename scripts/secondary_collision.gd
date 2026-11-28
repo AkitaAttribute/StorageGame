@@ -241,19 +241,14 @@ func colliders(kind: String) -> Array:
     var shoulders := at("leftUpperArm").distance_to(at("rightUpperArm"))
     if kind == "HAIR":
         var chest := at("chest") if rig.target_keys.has("chest") else pelvis.lerp(neck, 0.70)
-        # Overlapping proxies cover the chest and shoulder width, with
-        # a small strand thickness margin. A central narrow capsule alone
-        # leaves the outer ribs and shoulder blades unprotected.
-        var radius := clampf(shoulders * 0.43, 0.115, 0.17)
-        result.append([pelvis, chest, radius])
-        result.append([chest, neck, radius])
-        result.append([neck, at("head"), 0.085])
+        # Two slender overlapping torso capsules and a neck capsule.
+        # The source hair is already styled; collision only corrects
+        # strands that actually enter these body volumes.
+        result.append([pelvis, chest, clampf(shoulders * 0.38, 0.10, 0.15)])
+        result.append([chest, neck, clampf(shoulders * 0.38, 0.10, 0.15)])
+        result.append([neck, at("head"), 0.078])
         for side in ["left", "right"]:
-            var shoulder := at(side + "UpperArm")
-            var elbow := at(side + "LowerArm")
-            result.append([chest.lerp(shoulder, 0.45), shoulder, 0.090])
-            result.append([shoulder, elbow, 0.070])
-            result.append([elbow, at(side + "Hand"), 0.046])
+            result.append([at(side + "UpperArm"), at(side + "LowerArm"), 0.065])
     else:
         for side in ["left", "right"]:
             result.append([at(side + "UpperLeg"), at(side + "LowerLeg"), 0.082])
@@ -261,77 +256,6 @@ func colliders(kind: String) -> Array:
             var forearm := (wrist - at(side + "LowerArm")).normalized()
             result.append([wrist, wrist + forearm * 0.085, 0.048])
     return result
-
-# Hair is a set of swept bone segments, not just joint endpoints.
-# Check a fixed number of points along each link and choose the largest
-# correction; at most one rotation per link, no mesh or triangle search.
-func hair_link_correction(start: Vector3, end: Vector3, volumes: Array, preferred: Vector3) -> Vector3:
-    var correction := Vector3.ZERO
-    for fraction in [0.40, 0.70, 1.0]:
-        var point := start.lerp(end, float(fraction))
-        var goal := point
-        for volume in volumes:
-            goal = outside_capsule(goal, volume[0], volume[1], float(volume[2]), preferred)
-        var change := (goal - point) / float(fraction)
-        if change.length_squared() > correction.length_squared():
-            correction = change
-    return correction.limit_length(0.12)
-
-func solve_hair() -> void:
-    var volumes := colliders("HAIR")
-    var members: Array = groups["HAIR"]
-    var head := at("head")
-    for bone in members:
-        var children := skeleton.get_bone_children(bone)
-        var child := -1
-        for candidate in children:
-            if members.has(candidate):
-                child = candidate
-                break
-        var start := bone_at(bone)
-        var end: Vector3
-        if child >= 0:
-            end = bone_at(child)
-        else:
-            # Terminal hair geometry extends past the final joint.
-            # Continue its authored rest direction a short bounded distance.
-            var parent := skeleton.get_bone_parent(bone)
-            if parent < 0 or not members.has(parent):
-                continue
-            var rest := skeleton.get_bone_global_rest(bone)
-            var rest_parent := skeleton.get_bone_global_rest(parent)
-            var local_axis := rest.basis.inverse() * (rest.origin - rest_parent.origin).normalized()
-            var live := skeleton.get_bone_global_pose(bone)
-            var tip_length := clampf(rest.origin.distance_to(rest_parent.origin) * float(rig.target_scale) * 0.55, 0.012, 0.035)
-            var tip := visual.to_local(skeleton.to_global(live.origin + live.basis * local_axis))
-            end = start + (tip - start).normalized() * tip_length
-        var preferred := end - head
-        preferred.y = 0.0
-        if preferred.length_squared() < 0.0001:
-            preferred = Vector3(0, 0, -1)
-        var change := hair_link_correction(start, end, volumes, preferred)
-        if change.length_squared() < 0.000001:
-            continue
-        var old_axis := end - start
-        var new_axis := old_axis + change
-        if old_axis.length_squared() < 0.000001 or new_axis.length_squared() < 0.000001:
-            continue
-        var angle := old_axis.angle_to(new_axis)
-        var blend := minf(1.0, deg_to_rad(28.0) / maxf(angle, 0.0001))
-        if child >= 0:
-            var desired := skeleton.to_local(visual.to_global(start + new_axis)) - skeleton.get_bone_global_pose(bone).origin
-            rig.aim_arm_bone(bone, child, desired, blend)
-        else:
-            var from := skeleton.to_local(visual.to_global(end)) - skeleton.get_bone_global_pose(bone).origin
-            var to := skeleton.to_local(visual.to_global(start + new_axis)) - skeleton.get_bone_global_pose(bone).origin
-            var pose := skeleton.get_bone_global_pose(bone)
-            var rotation := Basis(Quaternion(from.normalized(), to.normalized())) * pose.basis.orthonormalized()
-            var parent := skeleton.get_bone_parent(bone)
-            if parent >= 0:
-                rotation = skeleton.get_bone_global_pose(parent).basis.orthonormalized().inverse() * rotation
-            var old := skeleton.get_bone_pose_rotation(bone)
-            skeleton.set_bone_pose_rotation(bone, old.slerp(rotation.get_rotation_quaternion(), blend))
-            skeleton.force_update_all_bone_transforms()
 
 func tick(delta: float, gait: RefCounted = null, holding: bool = false, held_side: String = "right") -> void:
     if skeleton == null:
@@ -344,7 +268,7 @@ func tick(delta: float, gait: RefCounted = null, holding: bool = false, held_sid
         var previous: Quaternion = last_pose[i]
         skeleton.set_bone_pose_rotation(i, previous.slerp(rest, 1.0 - exp(-delta * 12.0)))
     skeleton.force_update_all_bone_transforms()
-    for kind in ["SKIRT"]:
+    for kind in groups:
         var volumes := colliders(str(kind))
         # Hand/cloth contact is handled by the skinned-surface solver
         # after the leg collision pass. Do not repel fabric from hands
@@ -375,9 +299,7 @@ func tick(delta: float, gait: RefCounted = null, holding: bool = false, held_sid
                 var desired := skeleton.to_local(visual.to_global(goal)) - skeleton.get_bone_global_pose(parent).origin
                 rig.aim_arm_bone(parent, child, desired, blend)
                 break
-    if gait != null:
-        solve_hand_skirt(delta, gait, holding, held_side)
-    # Hair sees the final shoulders, arms and torso for this frame.
-    solve_hair()
     for i in last_pose:
         last_pose[i] = skeleton.get_bone_pose_rotation(i)
+    if gait != null:
+        solve_hand_skirt(delta, gait, holding, held_side)
