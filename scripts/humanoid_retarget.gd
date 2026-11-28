@@ -184,18 +184,41 @@ func aim_arm_bone(bone: int, child: int, desired: Vector3, weight: float) -> voi
     target.set_bone_pose_rotation(bone, original.slerp(basis.orthonormalized().get_rotation_quaternion(), weight))
     target.force_update_all_bone_transforms()
 
-func apply_force_pose(world_point: Vector3, weight: float) -> void:
-    if target == null or not target_keys.has("rightUpperArm") or not target_keys.has("rightLowerArm") or not target_keys.has("rightHand"):
+# Use the actual avatar's anatomical sides rather than assuming a
+# particular global coordinate sign. A small dead band prevents flicker.
+func carry_hand(world_point: Vector3, previous: String = "right") -> String:
+    var midpoint := (target.get_bone_global_pose(int(target_keys["leftUpperArm"])).origin + target.get_bone_global_pose(int(target_keys["rightUpperArm"])).origin) * 0.5
+    var lateral := target_basis * (target.to_local(world_point) - midpoint)
+    var left_axis := target_basis * (target.get_bone_global_rest(target_keys["leftUpperArm"]).origin - target.get_bone_global_rest(target_keys["rightUpperArm"]).origin)
+    var side_distance := lateral.x * signf(left_axis.x) * target_scale
+    if side_distance > 0.055:
+        return "left"
+    if side_distance < -0.055:
+        return "right"
+    return previous
+
+func apply_force_pose(world_point: Vector3, weight: float, side: String = "right") -> void:
+    if target == null or not target_keys.has(side + "UpperArm") or not target_keys.has(side + "LowerArm") or not target_keys.has(side + "Hand"):
         return
-    var upper: int = target_keys["rightUpperArm"]
-    var lower: int = target_keys["rightLowerArm"]
-    var hand: int = target_keys["rightHand"]
-    var point := target.to_local(world_point)
+    var upper: int = target_keys[side + "UpperArm"]
+    var lower: int = target_keys[side + "LowerArm"]
+    var hand: int = target_keys[side + "Hand"]
     var shoulder := target.get_bone_global_pose(upper).origin
+    var other_side := "left" if side == "right" else "right"
+    var other := target.get_bone_global_pose(target_keys[other_side + "UpperArm"]).origin
+    var midpoint := (shoulder + other) * 0.5
+    var sign_side := signf((target_basis * (skeleton_rest_arm(upper) - skeleton_rest_arm(int(target_keys[other_side + "UpperArm"])))).x)
+    var local_goal := target_basis * (target.to_local(world_point) - midpoint)
+    # While the previous hand lowers, never aim it across the chest.
+    # Also keep the aiming ray in front during a quick camera reversal.
+    local_goal.x = sign_side * maxf(0.0, local_goal.x * sign_side)
+    local_goal.z = maxf(local_goal.z, 0.18 / maxf(target_scale, 0.001))
+    var point := midpoint + target_basis.inverse() * local_goal
     var toward := (point - shoulder).normalized()
-    # Keep a small outward/downward bend at the elbow, so the forearm
-    # reaches the object rather than locking the whole limb straight.
-    var outward := target_basis.inverse() * Vector3(-0.22, -0.19, 0.0)
+    var outward := target_basis.inverse() * Vector3(sign_side * 0.22, -0.19, 0.0)
     aim_arm_bone(upper, lower, toward + outward, weight)
     var elbow := target.get_bone_global_pose(lower).origin
     aim_arm_bone(lower, hand, point - elbow, weight)
+
+func skeleton_rest_arm(bone: int) -> Vector3:
+    return target.get_bone_global_rest(bone).origin

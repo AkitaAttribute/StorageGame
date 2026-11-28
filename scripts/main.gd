@@ -60,7 +60,8 @@ var gait_clip: StringName = &""
 var gait_directional := false
 var gait_blend := 1.0
 var gait_from: Dictionary = {}
-var force_pose_weight := 0.0
+var carry_hand_side := "right"
+var carry_hand_weights: Dictionary = {"left": 0.0, "right": 0.0}
 var force_target := Vector3.ZERO
 var state: Dictionary = {}
 var doors: Array[Dictionary] = []
@@ -734,13 +735,13 @@ func _physics_process(delta: float) -> void:
             var requested_suffix := "bwd" if carrying and carry_backward else "fwd"
             animate_directional(delta, animation_velocity, moving, requested_suffix)
             if natural_gait != null and natural_gait.ready:
-                var holding_prop := is_instance_valid(household) and is_instance_valid(household.held)
+                # Both arms get a stable base clip before the carry overlay.
                 var arm_state := "idle" if not moving else ("backward" if gait_directional else "walk")
                 var arm_player := directional_animator if gait_directional else animator
                 var arm_phase := 0.0
                 if arm_player != null and gait_clip != &"" and arm_player.has_animation(gait_clip):
                     arm_phase = arm_player.current_animation_position / maxf(arm_player.get_animation(gait_clip).length, 0.001)
-                natural_gait.tick(delta, displacement / maxf(delta, 0.001), player.is_on_floor() or stepped_last_frame, holding_prop, arm_state, arm_phase)
+                natural_gait.tick(delta, displacement / maxf(delta, 0.001), player.is_on_floor() or stepped_last_frame, false, arm_state, arm_phase)
             else:
                 foot_offset = lerpf(foot_offset, retargeter.foot_ground_correction(), 1.0 - exp(-delta * 24.0))
                 avatar_model.position.y = avatar_base_y + foot_offset
@@ -759,11 +760,20 @@ func _physics_process(delta: float) -> void:
                 force_target = force_target.lerp(target_point, 1.0 - exp(-delta * 16.0))
         else:
             carry_aim_ready = false
-        force_pose_weight = move_toward(force_pose_weight, 1.0 if holding else 0.0, delta * 6.0)
-        if avatar_ready and force_pose_weight > 0.0:
-            retargeter.apply_force_pose(force_target, force_pose_weight)
+        if avatar_ready:
+            if holding:
+                carry_hand_side = retargeter.carry_hand(force_target, carry_hand_side)
+            for side in ["left", "right"]:
+                var desired := 1.0 if holding and side == carry_hand_side else 0.0
+                var weight := move_toward(float(carry_hand_weights[side]), desired, delta * 8.0)
+                carry_hand_weights[side] = weight
+                if weight > 0.0:
+                    retargeter.apply_force_pose(force_target, weight, side)
     if secondary_collision != null:
-        secondary_collision.tick(delta, natural_gait, is_instance_valid(household) and is_instance_valid(household.held))
+        var left_aim := float(carry_hand_weights["left"]) > 0.001
+        var right_aim := float(carry_hand_weights["right"]) > 0.001
+        var contact_mask := "both" if left_aim and right_aim else ("left" if left_aim else "right")
+        secondary_collision.tick(delta, natural_gait, left_aim or right_aim, contact_mask)
     update_nearby()
     if Input.is_action_just_pressed("use"):
         use_nearby()
@@ -954,6 +964,12 @@ func _smoke() -> void:
         return
     if direction_clips.size() != 8 or directional_rig == null or secondary_collision == null or secondary_collision.groups["HAIR"].is_empty():
         push_error("Directional animation or hair rig failed to initialize")
+        get_tree().quit(1)
+        return
+    # A segment can cross a body proxy even when its endpoint is clear.
+    var hair_probe := secondary_collision.hair_link_correction(Vector3(-0.2, 0, 0), Vector3(0.2, 0, 0), [[Vector3(0, -0.1, 0), Vector3(0, 0.1, 0), 0.08]], Vector3.BACK)
+    if hair_probe.length() < 0.02:
+        push_error("Hair segment midpoint collision was missed")
         get_tree().quit(1)
         return
     # Verify directions classify distinctly and authored clips actually
@@ -1326,12 +1342,28 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     var right_arm: int = retargeter.target_keys["rightUpperArm"]
-    var arm_before := retargeter.target.get_bone_pose_rotation(right_arm)
-    retargeter.apply_force_pose(player.global_position + Vector3(1, 1.5, 1), 1.0)
-    if arm_before.angle_to(retargeter.target.get_bone_pose_rotation(right_arm)) < 0.01:
-        push_error("Right-arm grab pose failed")
+    var left_arm: int = retargeter.target_keys["leftUpperArm"]
+    var shoulder_center := (retargeter.target.get_bone_global_pose(right_arm).origin + retargeter.target.get_bone_global_pose(left_arm).origin) * 0.5
+    var left_axis := (retargeter.target_basis * (retargeter.target.get_bone_global_rest(left_arm).origin - retargeter.target.get_bone_global_rest(right_arm).origin)).normalized()
+    var forward_axis := retargeter.target_basis.inverse() * Vector3.BACK
+    var center_goal := retargeter.target.to_global(shoulder_center + forward_axis)
+    var left_goal := retargeter.target.to_global(shoulder_center + forward_axis + retargeter.target_basis.inverse() * left_axis)
+    var right_goal := retargeter.target.to_global(shoulder_center + forward_axis - retargeter.target_basis.inverse() * left_axis)
+    if retargeter.carry_hand(left_goal, "right") != "left" or retargeter.carry_hand(right_goal, "left") != "right" or retargeter.carry_hand(center_goal, "left") != "left" or retargeter.carry_hand(center_goal, "right") != "right":
+        push_error("Carry hand switch or center hysteresis failed")
         get_tree().quit(1)
         return
+    for side in ["left", "right"]:
+        var aimed_bone: int = retargeter.target_keys[side + "UpperArm"]
+        var free_bone: int = right_arm if side == "left" else left_arm
+        var arm_before := retargeter.target.get_bone_pose_rotation(aimed_bone)
+        var free_before := retargeter.target.get_bone_pose_rotation(free_bone)
+        retargeter.apply_force_pose(left_goal if side == "left" else right_goal, 1.0, side)
+        if arm_before.angle_to(retargeter.target.get_bone_pose_rotation(aimed_bone)) < 0.01 or free_before.angle_to(retargeter.target.get_bone_pose_rotation(free_bone)) > 0.001:
+            push_error("Side-specific grab pose failed: " + side)
+            get_tree().quit(1)
+            return
+    print("CARRY_HAND_SWITCH_PASS")
     var original_prop_position := test_prop.global_position
     var original_prop_rotation := test_prop.rotation
     test_prop.linear_velocity = Vector3.ZERO
