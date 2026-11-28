@@ -124,10 +124,12 @@ for filename, (url, size, git_sha) in MODELS.items():
             elif isinstance(value, list):
                 for child in value:
                     remove_vrm(child)
+        from wardrobe_assets import add_wardrobe
+        wardrobe_bin = add_wardrobe(doc, data[28 + length:], CACHE)
         remove_vrm(doc)
         payload = json.dumps(doc, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         payload += b" " * ((-len(payload)) % 4)
-        rest = data[20 + length:]
+        rest = wardrobe_bin
         target.write_bytes(struct.pack("<4sIIII", b"glTF", 2, 20 + len(payload) + len(rest), len(payload), 0x4E4F534A) + payload + rest)
         print("Shino humanoid bones:", [item["bone"] for item in human])
         continue

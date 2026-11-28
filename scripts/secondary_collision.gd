@@ -20,6 +20,7 @@ var last_contact_overlap := 0.0
 var last_contact_compression := 0.0
 # Sleeve geometry is measured once at load, not skinned/searched every tick.
 var sleeve_profiles: Dictionary = {}
+var skirt_enabled := true
 
 func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
     rig = retargeter
@@ -50,6 +51,8 @@ func cache_skirt_surface(avatar: Node3D) -> void:
     var pelvis := common_rest(int(rig.target_keys["hips"]))
     for node in avatar.find_children("*", "MeshInstance3D", true, false):
         var mesh_node := node as MeshInstance3D
+        if str(mesh_node.name).to_lower().begins_with("wardrobe"):
+            continue
         var skin := mesh_node.skin
         if mesh_node.mesh == null or skin == null:
             continue
@@ -115,6 +118,8 @@ func measure_sleeves(avatar: Node3D) -> void:
         var radial: Array[float] = []
         for node in avatar.find_children("*", "MeshInstance3D", true, false):
             var mesh_node := node as MeshInstance3D
+            if str(mesh_node.name).to_lower().begins_with("wardrobe"):
+                continue
             var skin := mesh_node.skin
             if mesh_node.mesh == null or skin == null:
                 continue
@@ -272,7 +277,9 @@ func deform_skirt(gait: RefCounted) -> void:
         applied[bone] = absolute
 
 func solve_hand_skirt(delta: float, gait: RefCounted, holding: bool, held_side: String = "right") -> void:
-    if skirt_samples.is_empty():
+    if not skirt_enabled or skirt_samples.is_empty():
+        last_contact_overlap = 0.0
+        last_contact_compression = 0.0
         return
     reset_skirt_positions()
     var surface := skirt_surface()
@@ -364,6 +371,8 @@ func tick(delta: float, gait: RefCounted = null, holding: bool = false, held_sid
     # Keep the original five torso/arm proxies and endpoint behavior.
     # Process skirt first so the sleeves follow the final arm pose.
     for kind in ["SKIRT", "HAIR"]:
+        if kind == "SKIRT" and not skirt_enabled:
+            continue
         if kind == "HAIR" and gait != null:
             solve_hand_skirt(delta, gait, holding, held_side)
         var volumes := colliders(str(kind))

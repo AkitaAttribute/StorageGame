@@ -9,6 +9,7 @@ const HumanoidRetarget = preload("res://scripts/humanoid_retarget.gd")
 const HouseholdProps = preload("res://scripts/household_props.gd")
 const NaturalGait = preload("res://scripts/natural_gait.gd")
 const SecondaryCollision = preload("res://scripts/secondary_collision.gd")
+const Wardrobe = preload("res://scripts/wardrobe.gd")
 const DIRECTIONAL_CHARACTER := "res://assets/directional_walk.glb"
 const SPEED := 3.4
 const TRAVEL_TURN_RATE := deg_to_rad(420.0)
@@ -44,6 +45,11 @@ var camera_touch := -1
 var camera_mouse_paused := false
 var visual_step_offset := 0.0
 var avatar_model: Node3D
+var wardrobe: Wardrobe
+var wardrobe_button: Button
+var wardrobe_panel: PanelContainer
+var wardrobe_buttons: Dictionary = {}
+var wardrobe_was_mouse_paused := false
 var avatar_base_y := 0.0
 var foot_offset := 0.0
 var movement_joystick: Control
@@ -238,6 +244,9 @@ func start_game(data: Dictionary) -> void:
     var donor := model(CHARACTER, visual)
     var avatar := model(AVATAR, visual)
     avatar_model = avatar
+    wardrobe = Wardrobe.new()
+    wardrobe.setup(avatar)
+    wardrobe.restore(state.get("wardrobe", {}))
     # The original VRM 0.x model faces -Z, while the game uses +Z forward.
     avatar.rotation.y = PI
     var bounds := model_bounds(avatar)
@@ -277,6 +286,7 @@ func start_game(data: Dictionary) -> void:
         natural_gait.setup(retargeter, player, visual, avatar_model, avatar_base_y)
         secondary_collision = SecondaryCollision.new()
         secondary_collision.setup(retargeter, visual, avatar_model)
+        secondary_collision.skirt_enabled = wardrobe.selected["bottom"] != "trousers"
         natural_gait.skirt_half_width = secondary_collision.skirt_half_width
         var directional_donor := model(DIRECTIONAL_CHARACTER, visual)
         directional_donor.visible = false
@@ -460,6 +470,7 @@ func create_hud() -> void:
     prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
     prompt.add_theme_font_size_override("font_size", 24)
     hud.add_child(prompt)
+    create_wardrobe_ui()
     if not mobile:
         return
     var joystick := VirtualJoystick.new()
@@ -515,6 +526,82 @@ func create_hud() -> void:
     use_button.hide()
     hud.add_child(use_button)
 
+func create_wardrobe_ui() -> void:
+    wardrobe_button = Button.new()
+    wardrobe_button.text = "Wardrobe" if mobile else "Wardrobe (V)"
+    wardrobe_button.position = Vector2(18, 18)
+    wardrobe_button.custom_minimum_size = Vector2(190, 56)
+    wardrobe_button.add_theme_font_size_override("font_size", 23)
+    wardrobe_button.disabled = wardrobe == null or not wardrobe.ready
+    hud.add_child(wardrobe_button)
+    wardrobe_button.pressed.connect(toggle_wardrobe)
+    wardrobe_panel = PanelContainer.new()
+    wardrobe_panel.position = Vector2(18, 84)
+    wardrobe_panel.custom_minimum_size = Vector2(330, 0)
+    hud.add_child(wardrobe_panel)
+    var column := VBoxContainer.new()
+    column.add_theme_constant_override("separation", 7)
+    wardrobe_panel.add_child(column)
+    var title := Label.new()
+    title.text = "Character wardrobe"
+    title.add_theme_font_size_override("font_size", 25)
+    column.add_child(title)
+    for slot in ["top","bottom"]:
+        var heading := Label.new()
+        heading.text = "Tops" if slot == "top" else "Bottoms"
+        heading.add_theme_font_size_override("font_size", 21)
+        column.add_child(heading)
+        for item in Wardrobe.CATALOG[slot]:
+            var id := str(item["id"])
+            var choice := Button.new()
+            choice.text = str(item["label"])
+            choice.toggle_mode = true
+            choice.custom_minimum_size = Vector2(310, 44)
+            choice.add_theme_font_size_override("font_size", 20)
+            column.add_child(choice)
+            wardrobe_buttons[slot+id] = choice
+            choice.pressed.connect(choose_wardrobe.bind(slot,id))
+    var done := Button.new()
+    done.text = "Done"
+    done.custom_minimum_size.y = 48
+    column.add_child(done)
+    done.pressed.connect(toggle_wardrobe)
+    wardrobe_panel.hide()
+    refresh_wardrobe_ui()
+
+func refresh_wardrobe_ui() -> void:
+    if wardrobe == null:
+        return
+    for slot in ["top","bottom"]:
+        for item in Wardrobe.CATALOG[slot]:
+            var id := str(item["id"])
+            var choice: Button = wardrobe_buttons[slot+id]
+            choice.set_pressed_no_signal(wardrobe.selected[slot] == id)
+            choice.disabled = not wardrobe.valid(slot,id)
+
+func choose_wardrobe(slot: String,id: String) -> void:
+    if wardrobe.choose(slot,id):
+        if secondary_collision != null:
+            secondary_collision.skirt_enabled = wardrobe.selected["bottom"] != "trousers"
+        refresh_wardrobe_ui()
+        save_game()
+
+func toggle_wardrobe() -> void:
+    if not is_instance_valid(wardrobe_panel) or wardrobe == null or not wardrobe.ready:
+        return
+    if wardrobe_panel.visible:
+        wardrobe_panel.hide()
+        camera_mouse_paused = wardrobe_was_mouse_paused
+        if not mobile and DisplayServer.get_name() != "headless":
+            Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if camera_mouse_paused else Input.MOUSE_MODE_CAPTURED
+    else:
+        wardrobe_was_mouse_paused = camera_mouse_paused
+        wardrobe_panel.show()
+        camera_touch = -1
+        camera_mouse_paused = true
+        if not mobile and DisplayServer.get_name() != "headless":
+            Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+
 func orbit_camera(relative: Vector2) -> void:
     camera_yaw = wrapf(camera_yaw - relative.x * CAMERA_SENSITIVITY, -PI, PI)
     camera_pitch = clampf(camera_pitch + relative.y * CAMERA_SENSITIVITY, -CAMERA_PITCH_LIMIT, CAMERA_PITCH_LIMIT)
@@ -522,8 +609,21 @@ func orbit_camera(relative: Vector2) -> void:
 func _input(event: InputEvent) -> void:
     if not is_instance_valid(player):
         return
+    if not mobile and event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_V:
+        toggle_wardrobe()
+        get_viewport().set_input_as_handled()
+        return
+    if is_instance_valid(wardrobe_panel) and wardrobe_panel.visible:
+        if event is InputEventKey and event.pressed and not event.echo and event.physical_keycode == KEY_ESCAPE:
+            toggle_wardrobe()
+            get_viewport().set_input_as_handled()
+        return
     if mobile:
         if event is InputEventScreenTouch:
+            if event.pressed and is_instance_valid(wardrobe_button) and wardrobe_button.get_global_rect().has_point(event.position):
+                toggle_wardrobe()
+                get_viewport().set_input_as_handled()
+                return
             if not event.pressed:
                 if event.index == camera_touch:
                     camera_touch = -1
@@ -655,7 +755,7 @@ func try_step_up(body: CharacterBody3D, motion: Vector3) -> bool:
 func _physics_process(delta: float) -> void:
     if not is_instance_valid(player):
         return
-    var input := Input.get_vector("move_left", "move_right", "move_up", "move_down")
+    var input := Vector2.ZERO if is_instance_valid(wardrobe_panel) and wardrobe_panel.visible else Input.get_vector("move_left", "move_right", "move_up", "move_down")
     var direction := Vector3(input.x, 0, input.y).rotated(Vector3.UP, camera_yaw)
     # All joystick headings use the same shortest-arc turn. Ease translation
     # while making a large turn so the feet do not slide backward.
@@ -923,6 +1023,8 @@ func save_game() -> bool:
     state["rotation"] = visual.rotation.y
     state["camera_yaw"] = camera_yaw
     state["camera_pitch"] = camera_pitch
+    if wardrobe != null:
+        state["wardrobe"] = wardrobe.selected.duplicate()
     if is_instance_valid(household) and household.placement_complete and household.items.size() == HouseholdProps.DEFINITIONS.size():
         state["props"] = household.snapshot()
         state["prop_layout"] = HouseholdProps.LAYOUT_VERSION
@@ -1003,6 +1105,39 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     print("LOCAL_SLEEVE_CONTACT_PASS")
+    if wardrobe == null or not wardrobe.ready:
+        push_error("Wardrobe imported garment slots missing")
+        get_tree().quit(1)
+        return
+    for top_item in Wardrobe.CATALOG["top"]:
+        for bottom_item in Wardrobe.CATALOG["bottom"]:
+            if not wardrobe.choose("top",str(top_item["id"])) or not wardrobe.choose("bottom",str(bottom_item["id"])) or not wardrobe.consistent():
+                push_error("Independent wardrobe combination failed")
+                get_tree().quit(1)
+                return
+    for variant in wardrobe.variants.values():
+        var garment_node := variant as MeshInstance3D
+        if garment_node.skin == null or garment_node.get_node_or_null(garment_node.skeleton) != retargeter.target:
+            push_error("Wardrobe garment does not share the character skeleton")
+            get_tree().quit(1)
+            return
+    save_game()
+    var saved_wardrobe: Dictionary = Saves.read_slot(str(initial["id"])).get("wardrobe",{})
+    if saved_wardrobe.get("top") != "hoodie" or saved_wardrobe.get("bottom") != "trousers":
+        push_error("Wardrobe selections were not saved")
+        get_tree().quit(1)
+        return
+    wardrobe.restore(saved_wardrobe)
+    if not wardrobe.consistent():
+        push_error("Wardrobe restoration failed")
+        get_tree().quit(1)
+        return
+    wardrobe.restore({})
+    if not wardrobe.consistent() or wardrobe.selected["top"] != "original" or wardrobe.selected["bottom"] != "original":
+        push_error("Legacy save wardrobe defaults failed")
+        get_tree().quit(1)
+        return
+    print("WARDROBE_SMOKE_PASS")
     # Verify directions classify distinctly and authored clips actually
     # animate the target's thigh. No rendering-dependent assertions.
     var smoke_thigh: int = retargeter.target_keys["leftUpperLeg"]
