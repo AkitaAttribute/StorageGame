@@ -1166,6 +1166,42 @@ func _smoke() -> void:
             return
     wardrobe.restore({})
     secondary_collision.set_outfit("original","original")
+    # Sample all combinations with the real idle/walk clips and final
+    # contact pipeline. Check arm clearance, not just mesh visibility.
+    for top_item in Wardrobe.CATALOG["top"]:
+        for bottom_item in Wardrobe.CATALOG["bottom"]:
+            var top_id := str(top_item["id"])
+            var bottom_id := str(bottom_item["id"])
+            wardrobe.choose("top",top_id)
+            wardrobe.choose("bottom",bottom_id)
+            secondary_collision.set_outfit(top_id,bottom_id)
+            for state_name in ["idle","walk"]:
+                var clip: StringName = idle if state_name == "idle" else walk
+                animator.play(clip)
+                animator.seek(0.0,true)
+                var min_angle := 90.0
+                var max_angle := 0.0
+                for frame in range(36):
+                    animator.advance(animator.get_animation(clip).length/24.0)
+                    retargeter.apply_pose()
+                    natural_gait.limit_torso(0.0 if state_name == "idle" else 1.0)
+                    natural_gait.keep_arms_clear(1.0/60.0,0.0 if state_name == "idle" else SPEED,false,state_name,animator.current_animation_position/animator.get_animation(clip).length)
+                    secondary_collision.tick(1.0/60.0,natural_gait,false)
+                    if frame<12:continue
+                    for side in ["left","right"]:
+                        var upper: int = retargeter.target_keys[side+"UpperArm"]
+                        var lower: int = retargeter.target_keys[side+"LowerArm"]
+                        var axis := retargeter.target_basis*(retargeter.target.get_bone_global_pose(lower).origin-retargeter.target.get_bone_global_pose(upper).origin)
+                        var angle := rad_to_deg(atan2(axis.x*float(natural_gait.arm_sides[side]),maxf(0.001,-axis.y)))
+                        min_angle = minf(min_angle,angle)
+                        max_angle = maxf(max_angle,angle)
+                print("WARDROBE_ANIMATED ",top_id,"/",bottom_id," ",state_name," min=",min_angle," max=",max_angle)
+                if min_angle < (16.0 if state_name == "idle" else 10.0) or max_angle > 32.0:
+                    push_error("Outfit arm clearance regression: "+top_id+"/"+bottom_id+" "+state_name)
+                    get_tree().quit(1)
+                    return
+    wardrobe.restore({})
+    secondary_collision.set_outfit("original","original")
     print("WARDROBE_FIT_SMOKE_PASS")
     # Verify directions classify distinctly and authored clips actually
     # animate the target's thigh. No rendering-dependent assertions.

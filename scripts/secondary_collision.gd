@@ -27,6 +27,7 @@ var hoodie_samples: Array[Dictionary] = []
 var hoodie_sample_bones: Dictionary = {}
 var hoodie_arm_offset: Dictionary = {"left": 0.0, "right": 0.0}
 var hoodie_back_radius := 0.0
+var trouser_arm_offset: Dictionary = {"left": 0.0, "right": 0.0}
 
 func set_outfit(top: String, bottom: String) -> void:
     hoodie_enabled = top == "hoodie"
@@ -36,6 +37,8 @@ func set_outfit(top: String, bottom: String) -> void:
         arm_residual = {"left": 0.0, "right": 0.0}
     if not hoodie_enabled:
         hoodie_arm_offset = {"left": 0.0, "right": 0.0}
+    if skirt_enabled:
+        trouser_arm_offset = {"left": 0.0, "right": 0.0}
 
 
 func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
@@ -310,6 +313,26 @@ func hoodie_surface() -> PackedVector3Array:
         result.append(pos/float(sample["total"]))
     return result
 
+# The free-arm base animation is unchanged. Trousers must not remove
+# the relaxed outward clearance that was present with the original skirt.
+func solve_trouser_arms(delta: float, gait: RefCounted, holding: bool, held_side: String) -> void:
+    if skirt_enabled:
+        return
+    for side in ["left","right"]:
+        if holding and (held_side == side or held_side == "both"):
+            trouser_arm_offset[side] = 0.0
+            continue
+        var sign_side: float = gait.arm_sides[side]
+        var upper: int = rig.target_keys[side+"UpperArm"]
+        var lower: int = rig.target_keys[side+"LowerArm"]
+        var axis: Vector3 = rig.target_basis * (skeleton.get_bone_global_pose(lower).origin-skeleton.get_bone_global_pose(upper).origin)
+        var angle := atan2(axis.x*sign_side,maxf(0.001,-axis.y))
+        var floor_angle := deg_to_rad(19.0 if gait.arm_state == "idle" else 15.0)
+        var desired := clampf(floor_angle-angle,0.0,deg_to_rad(8.0))
+        var offset := lerpf(float(trouser_arm_offset[side]),desired,1.0-exp(-delta*12.0))
+        trouser_arm_offset[side] = offset
+        gait.abduct_chain(side,sign_side,offset)
+
 func solve_hoodie_arms(delta: float, gait: RefCounted, holding: bool, held_side: String) -> void:
     if not hoodie_enabled or hoodie_samples.is_empty():
         return
@@ -325,7 +348,7 @@ func solve_hoodie_arms(delta: float, gait: RefCounted, holding: bool, held_side:
         points.append(elbow)
         points.append(elbow.lerp(wrist,0.5))
         var overlap := surface_overlap(points,surface,sign_side)
-        var budget := maxf(0.0,deg_to_rad(12.0)-float(arm_residual[side]))
+        var budget := maxf(0.0,deg_to_rad(12.0)-float(arm_residual[side])-float(trouser_arm_offset[side]))
         var desired := clampf(overlap/0.42,0.0,minf(budget,deg_to_rad(8.0)))
         var offset := minf(budget,lerpf(float(hoodie_arm_offset[side]),desired,1.0-exp(-delta*12.0)))
         hoodie_arm_offset[side] = offset
@@ -512,6 +535,7 @@ func tick(delta: float, gait: RefCounted = null, holding: bool = false, held_sid
             continue
         if kind == "HAIR" and gait != null:
             solve_hand_skirt(delta, gait, holding, held_side)
+            solve_trouser_arms(delta, gait, holding, held_side)
             solve_hoodie_arms(delta, gait, holding, held_side)
         var volumes := colliders(str(kind))
         var sleeves := sleeve_colliders() if kind == "HAIR" else []

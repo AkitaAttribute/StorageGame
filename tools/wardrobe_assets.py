@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import math
 import struct
 import urllib.request
 
@@ -153,6 +154,48 @@ def add_wardrobe(doc, raw_bin, cache):
         t=max(0.,min(1.,(x-a)/(b-a)))
         return t*t*(3.-2.*t)
     hips=target_rest[target_joint[target_human["hips"]]][12:15]
+    # Measure only vertices indexed by each clothing primitive, not the
+    # shared Body accessor (which also includes hair, shoes and fingers).
+    def indexed_triangles(prim):
+        pos=read(doc,buf,prim["attributes"]["POSITION"])
+        ids=[v[0] for v in read(doc,buf,prim["indices"])]
+        return [tuple(pos[k] for k in ids[i:i+3]) for i in range(0,len(ids),3)]
+    top_tri=indexed_triangles(garment(doc,base,"Tops"))
+    skirt_tri=indexed_triangles(garment(doc,base,"Bottoms"))
+    torso_top=[v for tri in top_tri for v in tri if abs(v[0]-hips[0])<.21]
+    skirt_pts=[v for tri in skirt_tri for v in tri]
+    shirt_hem=min(v[1] for v in torso_top)
+    skirt_waist=max(v[1] for v in skirt_pts)
+    pants_waist=shirt_hem+.045
+    hoodie_hem=skirt_waist-.018
+    print("WARDROBE_SEAMS", "shirt_hem",shirt_hem,"skirt_waist",skirt_waist,
+          "pants_waist",pants_waist,"hoodie_hem",hoodie_hem)
+    if not (.65<shirt_hem<1.15 and .65<skirt_waist<1.15):
+        raise RuntimeError("Unexpected original garment seams")
+    def cross2(a,b):
+        return a[0]*b[1]-a[1]*b[0]
+    def section_radius(tris,y,dx,dz):
+        # Intersect the horizontal plane with actual cloth triangles, then
+        # measure along the requested radial ray. No bounding box inflation.
+        direction=(dx,dz)
+        far=0.
+        for tri in tris:
+            if not min(v[1] for v in tri)<=y<=max(v[1] for v in tri):continue
+            hits=[]
+            for a,b in zip(tri,tri[1:]+tri[:1]):
+                if (a[1]<=y<b[1]) or (b[1]<=y<a[1]):
+                    t=(y-a[1])/(b[1]-a[1])
+                    hits.append((a[0]+t*(b[0]-a[0])-hips[0],a[2]+t*(b[2]-a[2])-hips[2]))
+            if len(hits)!=2:continue
+            a,b=hits
+            edge=(b[0]-a[0],b[1]-a[1])
+            den=cross2(direction,edge)
+            if abs(den)<1e-9:continue
+            radius=cross2(a,edge)/den
+            u=cross2(a,direction)/den
+            if 0<=u<=1 and 0<radius<.27:far=max(far,radius)
+        return far
+    hip_joint=target_joint[target_human["hips"]]
     leg_centers={}
     for side in ("left","right"):
         leg_centers[side]=[target_rest[target_joint[target_human[side+k]]][12:15]
@@ -168,9 +211,8 @@ def add_wardrobe(doc, raw_bin, cache):
         waist=smooth(hips[1]-.19,hips[1]-.065,y)
         cx=cx*(1.-waist)+hips[0]*waist
         cz=cz*(1.-waist)+hips[2]*waist
-        ease=1.06+.08*waist
-        return (cx+(x-cx)*ease,y+.023*smooth(hips[1]-.10,hips[1]+.065,y),
-                cz+(z-cz)*ease)
+        ease=1.045+.015*waist
+        return (cx+(x-cx)*ease,y,cz+(z-cz)*ease)
 
     # Different geometry: transfer the original weighted hoodie/trouser
     # vertices onto Shino's skin using the matching humanoid bind matrices.
@@ -187,7 +229,9 @@ def add_wardrobe(doc, raw_bin, cache):
         if key in target_human and target_human[key] in target_joint:
             mapping[i]=target_joint[target_human[key]]
     donor_bind=read(d,srcbuf,donor_skin["inverseBindMatrices"])
-    for category,name in [("Tops","WardrobeTopHoodie"),("Bottoms","WardrobeBottomTrousers")]:
+    # Fit the inner trousers first, so the outer hoodie can be fitted to both bottoms.
+    pants_tri=[]
+    for category,name in [("Bottoms","WardrobeBottomTrousers"),("Tops","WardrobeTopHoodie")]:
         p=garment(d,donor,category)
         attrs=p["attributes"]
         indexes=[v[0] for v in read(d,srcbuf,p["indices"])]
@@ -223,9 +267,106 @@ def add_wardrobe(doc, raw_bin, cache):
             out_joints.append(tuple([j for j,w in pairs]+[0]*(4-len(pairs))))
             out_weights.append(tuple([w/norm for j,w in pairs]+[0.]*(4-len(pairs))))
         if len(selected)<100:raise RuntimeError("Garment geometry unexpectedly small")
+        def pin_waist(i,amount):
+            # Match the stable pelvis at the shared seam. Blend back into
+            # original weights above/below it; do not modify the skeleton.
+            if amount<=0:return
+            weights={}
+            for j,w in zip(out_joints[i],out_weights[i]):
+                if w>1e-6:weights[j]=weights.get(j,0.)+w*(1-amount)
+            weights[hip_joint]=weights.get(hip_joint,0.)+amount
+            pairs=sorted(weights.items(),key=lambda x:-x[1])[:4]
+            total=sum(w for j,w in pairs)
+            out_joints[i]=tuple([j for j,w in pairs]+[0]*(4-len(pairs)))
+            out_weights[i]=tuple([w/total for j,w in pairs]+[0.]*(4-len(pairs)))
+        if category=="Bottoms":
+            old_waist=max(v[1] for v in out_pos)
+            for i,(x,y,z) in enumerate(out_pos):
+                band=smooth(old_waist-.20,old_waist,y)
+                y+=(pants_waist-old_waist)*band
+                dx,dz=x-hips[0],z-hips[2]
+                radius=math.hypot(dx,dz)
+                if radius>1e-6 and y>=shirt_hem-.015:
+                    # Fit the high edge INSIDE the uniform top, never
+                    # expand the top of the trousers through the shirt.
+                    outer=section_radius(top_tri,max(y,shirt_hem+.005),dx/radius,dz/radius)
+                    if outer>0:
+                        target=min(radius,max(.025,outer-.009))
+                        amount=smooth(shirt_hem-.015,shirt_hem+.012,y)
+                        radius2=radius+(target-radius)*amount
+                        x,z=hips[0]+dx/radius*radius2,hips[2]+dz/radius*radius2
+                    pin_waist(i,smooth(shirt_hem-.05,pants_waist,y)*.85)
+                out_pos[i]=(x,y,z)
+            pants_tri=[tuple(out_pos[remap[k]] for k in indexes[i:i+3]) for i in range(0,len(indexes),3)]
+            pants_positions=list(out_pos)
+        else:
+            # Shorten only torso-weighted hem, leaving sleeves and upper
+            # hoodie intact. The hem rests OVER the upper skirt/waistband.
+            torso_joint={target_joint[target_human[k]] for k in ("hips","spine","chest","upperChest","neck") if k in target_human}
+            torso_ids=[i for i,v in enumerate(out_pos) if abs(v[0]-hips[0])<.24 and sum(w for j,w in zip(out_joints[i],out_weights[i]) if j in torso_joint)>.55]
+            old_hem=min(out_pos[i][1] for i in torso_ids)
+            for i in torso_ids:
+                x,y,z=out_pos[i]
+                amount=1.-smooth(old_hem,old_hem+.22,y)
+                y+=max(0.,hoodie_hem-old_hem)*amount
+                dx,dz=x-hips[0],z-hips[2]
+                radius=math.hypot(dx,dz)
+                if radius>1e-6 and y<max(skirt_waist,pants_waist)+.06:
+                    # The same top can fit over either bottom. Use the
+                    # larger local section only at the actual hem overlap.
+                    outer=max(section_radius(skirt_tri,y,dx/radius,dz/radius),
+                              section_radius(pants_tri,y,dx/radius,dz/radius))
+                    if outer>0:
+                        new_radius=max(radius,outer+.014)
+                        x,z=hips[0]+dx/radius*new_radius,hips[2]+dz/radius*new_radius
+                    pin_waist(i,(1.-smooth(hoodie_hem,hoodie_hem+.13,y))*.85)
+                out_pos[i]=(x,y,z)
+            print("WARDROBE_HOODIE_HEM",old_hem,"->",min(out_pos[i][1] for i in torso_ids))
+        # Validate actual fitted seam samples, rather than just the mesh
+        # visibility flags. Only compare cross sections where both layers exist.
+        tests=0
+        bad=0
+        min_gap=1.
+        for i,(x,y,z) in enumerate(out_pos):
+            dx,dz=x-hips[0],z-hips[2]
+            radius=math.hypot(dx,dz)
+            if radius<.025 or radius>.25:continue
+            if category=="Bottoms" and y>=shirt_hem+.014:
+                outer=section_radius(top_tri,y,dx/radius,dz/radius)
+                gap=outer-radius
+            elif category=="Tops" and i in torso_ids and y<=max(skirt_waist,pants_waist):
+                outer=max(section_radius(skirt_tri,y,dx/radius,dz/radius),
+                          section_radius(pants_tri,y,dx/radius,dz/radius))
+                gap=radius-outer
+            else:continue
+            if outer<=0:continue
+            tests+=1
+            min_gap=min(min_gap,gap)
+            bad+=gap<.004
+        print("WARDROBE_LAYER_CHECK",name,"samples",tests,"bad",bad,"min_gap",min_gap)
+        if tests<8 or bad:
+            raise RuntimeError("Garment seam clearance failed: "+name)
+        # Recalculate normals after the seam deformation; preserve smoothing
+        # across coincident UV seam vertices by sharing their normal sum.
+        sums={}
+        for i in range(0,len(indexes),3):
+            ids=[remap[k] for k in indexes[i:i+3]]
+            a,b,c=[out_pos[k] for k in ids]
+            ab=[b[j]-a[j] for j in range(3)]
+            ac=[c[j]-a[j] for j in range(3)]
+            normal=(ab[1]*ac[2]-ab[2]*ac[1],ab[2]*ac[0]-ab[0]*ac[2],ab[0]*ac[1]-ab[1]*ac[0])
+            for k in ids:
+                key=tuple(round(v,6) for v in out_pos[k])
+                total=sums.setdefault(key,[0.,0.,0.])
+                for j in range(3):total[j]+=normal[j]
+        out_normals=[]
+        for i,v in enumerate(out_pos):
+            normal=sums[tuple(round(k,6) for k in v)]
+            length=math.sqrt(sum(k*k for k in normal))
+            out_normals.append(tuple(k/length for k in normal) if length>1e-9 else normals[selected[i]])
         q={"attributes":{
             "POSITION":accessor(out_pos,"VEC3",5126,34962),
-            "NORMAL":accessor([normals[v] for v in selected],"VEC3",5126,34962),
+            "NORMAL":accessor(out_normals,"VEC3",5126,34962),
             "TEXCOORD_0":accessor([uv[v] for v in selected],"VEC2",5126,34962),
             "JOINTS_0":accessor(out_joints,"VEC4",5123,34962),
             "WEIGHTS_0":accessor(out_weights,"VEC4",5126,34962)},
@@ -238,8 +379,8 @@ def add_wardrobe(doc, raw_bin, cache):
     # avatar skeleton or shrink its skin. Build an indexed skin substitute
     # with only the covered triangles removed; keep torso, hands and feet.
     # The cutoff comes from the fitted garment, not the source male body.
-    waist=max(v[1] for v in out_pos)-.032
-    cuff=min(v[1] for v in out_pos)+.038
+    waist=max(v[1] for v in pants_positions)-.020
+    cuff=min(v[1] for v in pants_positions)+.025
     kept_primitives=[]
     removed=0
     retained=0
