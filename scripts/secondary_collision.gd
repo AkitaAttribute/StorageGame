@@ -21,6 +21,22 @@ var last_contact_compression := 0.0
 # Sleeve geometry is measured once at load, not skinned/searched every tick.
 var sleeve_profiles: Dictionary = {}
 var skirt_enabled := true
+var hoodie_enabled := false
+var hoodie_sleeve_profiles: Dictionary = {}
+var hoodie_samples: Array[Dictionary] = []
+var hoodie_sample_bones: Dictionary = {}
+var hoodie_arm_offset: Dictionary = {"left": 0.0, "right": 0.0}
+var hoodie_back_radius := 0.0
+
+func set_outfit(top: String, bottom: String) -> void:
+    hoodie_enabled = top == "hoodie"
+    skirt_enabled = bottom != "trousers"
+    if not skirt_enabled:
+        skirt_compression = {"left": 0.0, "right": 0.0}
+        arm_residual = {"left": 0.0, "right": 0.0}
+    if not hoodie_enabled:
+        hoodie_arm_offset = {"left": 0.0, "right": 0.0}
+
 
 func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
     rig = retargeter
@@ -41,6 +57,8 @@ func setup(retargeter: RefCounted, root: Node3D, avatar: Node3D) -> void:
         skirt_rest_positions[bone] = skeleton.get_bone_rest(bone).origin
     cache_skirt_surface(avatar)
     measure_sleeves(avatar)
+    measure_sleeves(avatar, true)
+    cache_hoodie(avatar)
     print("SECONDARY_COLLISION hair=", groups["HAIR"].size(), " skirt=", groups["SKIRT"].size(), " skirt_width=", skirt_half_width, " surface_samples=", skirt_samples.size())
 
 # Cache a spatially decimated set of actual skin-weighted fabric
@@ -105,7 +123,7 @@ func cache_skirt_surface(avatar: Node3D) -> void:
 # Fit the proximal upper-arm/sleeve envelope from the avatar's actual
 # weighted vertices. Ignore hair and distal bare arm geometry. The fitted
 # volume follows the upper arm rather than inflating the entire torso.
-func measure_sleeves(avatar: Node3D) -> void:
+func measure_sleeves(avatar: Node3D, hoodie: bool = false) -> void:
     for side in ["left", "right"]:
         var upper: int = rig.target_keys[side + "UpperArm"]
         var lower: int = rig.target_keys[side + "LowerArm"]
@@ -118,7 +136,10 @@ func measure_sleeves(avatar: Node3D) -> void:
         var radial: Array[float] = []
         for node in avatar.find_children("*", "MeshInstance3D", true, false):
             var mesh_node := node as MeshInstance3D
-            if str(mesh_node.name).to_lower().begins_with("wardrobe"):
+            var node_name := str(mesh_node.name).to_lower()
+            if hoodie and not node_name.begins_with("wardrobetophoodie"):
+                continue
+            if not hoodie and node_name.begins_with("wardrobe"):
                 continue
             var skin := mesh_node.skin
             if mesh_node.mesh == null or skin == null:
@@ -161,19 +182,27 @@ func measure_sleeves(avatar: Node3D) -> void:
         var radius := 0.065
         if not radial.is_empty():
             radius = clampf(radial[floori(float(radial.size() - 1) * 0.92)] + 0.006, 0.045, 0.105)
-        sleeve_profiles[side] = {"radius": radius, "samples": radial.size()}
-        print("HAIR_SLEEVE ", side, " samples=", radial.size(), " radius=", radius)
+        if hoodie:
+            hoodie_sleeve_profiles[side] = {"radius": radius, "samples": radial.size()}
+        else:
+            sleeve_profiles[side] = {"radius": radius, "samples": radial.size()}
+        print("HAIR_SLEEVE ", side, " hoodie=", hoodie, " samples=", radial.size(), " radius=", radius)
 
 func sleeve_colliders() -> Array:
     var result: Array = []
+    var profiles := hoodie_sleeve_profiles if hoodie_enabled else sleeve_profiles
     for side in ["left", "right"]:
-        if not sleeve_profiles.has(side):
+        if not profiles.has(side):
             continue
         var shoulder := at(side + "UpperArm")
         var elbow := at(side + "LowerArm")
-        var radius: float = sleeve_profiles[side]["radius"]
-        # Short sleeve only. Keep the capsule close to the shoulder cap.
-        result.append([shoulder.lerp(elbow, 0.06), shoulder.lerp(elbow, 0.30), radius])
+        var radius: float = profiles[side]["radius"]
+        result.append([shoulder.lerp(elbow, 0.06), shoulder.lerp(elbow, 0.60 if hoodie_enabled else 0.30), radius])
+    if hoodie_enabled and hoodie_back_radius > 0.0:
+        var chest := at("chest")
+        var neck := at("neck")
+        # Short upper-back hood proxy only; no expansion of the whole torso.
+        result.append([chest.lerp(neck, 0.35) + Vector3(0,0,-0.035), neck + Vector3(0,0,-0.035), hoodie_back_radius])
     return result
 
 # Only a contacting link gets displaced. Preserve the original torso
@@ -193,6 +222,114 @@ func sleeve_link_goal(start: Vector3, end: Vector3, volumes: Array) -> Vector3:
             if change.length_squared() > correction.length_squared():
                 correction = change
     return end + correction.limit_length(0.035)
+
+# Cache a sparse, torso-weighted surface of the actual hoodie. Sleeve
+# vertices must not repel the very arm to which they are attached.
+func cache_hoodie(avatar: Node3D) -> void:
+    var torso: Array[int] = []
+    for key in ["hips","spine","chest","upperChest","neck"]:
+        if rig.target_keys.has(key):
+            torso.append(int(rig.target_keys[key]))
+    var occupied: Dictionary = {}
+    var chest := common_rest(int(rig.target_keys["chest"]))
+    var neck := common_rest(int(rig.target_keys["neck"]))
+    var hip := common_rest(int(rig.target_keys["hips"]))
+    var back_depth := 0.0
+    for node in avatar.find_children("*","MeshInstance3D",true,false):
+        var mesh_node := node as MeshInstance3D
+        if not str(mesh_node.name).to_lower().begins_with("wardrobetophoodie") or mesh_node.mesh == null or mesh_node.skin == null:
+            continue
+        var skin := mesh_node.skin
+        var binds: Dictionary = {}
+        for i in range(skin.get_bind_count()):
+            var name := str(skin.get_bind_name(i))
+            var bone := skeleton.find_bone(name) if not name.is_empty() else skin.get_bind_bone(i)
+            if bone >= 0:
+                binds[i] = bone
+        for surface in range(mesh_node.mesh.get_surface_count()):
+            var arrays := mesh_node.mesh.surface_get_arrays(surface)
+            var vertices: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
+            var bones: PackedInt32Array = arrays[Mesh.ARRAY_BONES]
+            var weights: PackedFloat32Array = arrays[Mesh.ARRAY_WEIGHTS]
+            if vertices.is_empty() or bones.is_empty() or weights.size() != bones.size():
+                continue
+            var stride := int(bones.size()/vertices.size())
+            for i in range(vertices.size()):
+                var ids: Array[int] = []
+                var amounts: Array[float] = []
+                var influence := 0.0
+                var total := 0.0
+                for j in range(stride):
+                    var bind := bones[i*stride+j]
+                    var weight := weights[i*stride+j]
+                    if weight <= 0.0001 or not binds.has(bind):
+                        continue
+                    var bone: int = binds[bind]
+                    ids.append(bone)
+                    amounts.append(weight)
+                    total += weight
+                    if torso.has(bone):
+                        influence += weight
+                if total < 0.001 or influence/total < 0.60:
+                    continue
+                var local := skeleton.to_local(mesh_node.to_global(vertices[i]))
+                var point: Vector3 = rig.target_basis * local * float(rig.target_scale)
+                if absf(point.x-hip.x) > 0.24:
+                    continue
+                if point.y > chest.y and point.y < neck.y+0.09:
+                    back_depth = maxf(back_depth, chest.z-point.z)
+                # Keep only the lower and side fabric for hand contact.
+                if point.y < hip.y-0.25 or point.y > neck.y or absf(point.x-hip.x) < 0.055:
+                    continue
+                var cell := Vector3i(roundi(point.x/0.035),roundi(point.y/0.035),roundi(point.z/0.035))
+                if occupied.has(cell):
+                    continue
+                occupied[cell] = true
+                for bone in ids:
+                    hoodie_sample_bones[bone] = skeleton.get_bone_global_rest(bone).affine_inverse()
+                hoodie_samples.append({"point":local,"ids":ids,"weights":amounts,"total":total})
+    if back_depth > 0.03:
+        hoodie_back_radius = clampf(back_depth-0.035+0.010,0.065,0.125)
+    print("HOODIE_CONTACT samples=",hoodie_samples.size()," hood_radius=",hoodie_back_radius)
+
+func hoodie_surface() -> PackedVector3Array:
+    var result := PackedVector3Array()
+    var transforms: Dictionary = {}
+    var to_visual := visual.global_transform.affine_inverse() * skeleton.global_transform
+    for bone in hoodie_sample_bones:
+        var inv: Transform3D = hoodie_sample_bones[bone]
+        transforms[bone] = to_visual * skeleton.get_bone_global_pose(bone) * inv
+    for sample in hoodie_samples:
+        var p: Vector3 = sample["point"]
+        var ids: Array = sample["ids"]
+        var weights: Array = sample["weights"]
+        var pos := Vector3.ZERO
+        for i in range(ids.size()):
+            var transform: Transform3D = transforms[ids[i]]
+            pos += (transform*p)*float(weights[i])
+        result.append(pos/float(sample["total"]))
+    return result
+
+func solve_hoodie_arms(delta: float, gait: RefCounted, holding: bool, held_side: String) -> void:
+    if not hoodie_enabled or hoodie_samples.is_empty():
+        return
+    var surface := hoodie_surface()
+    for side in ["left","right"]:
+        if holding and (held_side == side or held_side == "both"):
+            hoodie_arm_offset[side] = 0.0
+            continue
+        var sign_side: float = gait.arm_sides[side]
+        var points: Array[Vector3] = gait.hand_points(side)
+        var elbow := at(side+"LowerArm")
+        var wrist := at(side+"Hand")
+        points.append(elbow)
+        points.append(elbow.lerp(wrist,0.5))
+        var overlap := surface_overlap(points,surface,sign_side)
+        var budget := maxf(0.0,deg_to_rad(12.0)-float(arm_residual[side]))
+        var desired := clampf(overlap/0.42,0.0,minf(budget,deg_to_rad(8.0)))
+        var offset := minf(budget,lerpf(float(hoodie_arm_offset[side]),desired,1.0-exp(-delta*12.0)))
+        hoodie_arm_offset[side] = offset
+        gait.abduct_chain(side,sign_side,offset)
 
 func skirt_surface() -> PackedVector3Array:
     var result := PackedVector3Array()
@@ -375,6 +512,7 @@ func tick(delta: float, gait: RefCounted = null, holding: bool = false, held_sid
             continue
         if kind == "HAIR" and gait != null:
             solve_hand_skirt(delta, gait, holding, held_side)
+            solve_hoodie_arms(delta, gait, holding, held_side)
         var volumes := colliders(str(kind))
         var sleeves := sleeve_colliders() if kind == "HAIR" else []
         # Hand/cloth contact is handled by the skinned-surface solver

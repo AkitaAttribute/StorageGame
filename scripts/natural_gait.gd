@@ -129,6 +129,8 @@ func measure_skirt_geometry() -> void:
     # actual fabric rather than assuming that joint centers are its edge.
     for node in avatar.find_children("*", "MeshInstance3D", true, false):
         var mesh_node := node as MeshInstance3D
+        if str(mesh_node.name).to_lower().begins_with("wardrobe"):
+            continue
         var skin := mesh_node.skin
         if mesh_node.mesh == null or skin == null:
             continue

@@ -286,7 +286,7 @@ func start_game(data: Dictionary) -> void:
         natural_gait.setup(retargeter, player, visual, avatar_model, avatar_base_y)
         secondary_collision = SecondaryCollision.new()
         secondary_collision.setup(retargeter, visual, avatar_model)
-        secondary_collision.skirt_enabled = wardrobe.selected["bottom"] != "trousers"
+        secondary_collision.set_outfit(str(wardrobe.selected["top"]), str(wardrobe.selected["bottom"]))
         natural_gait.skirt_half_width = secondary_collision.skirt_half_width
         var directional_donor := model(DIRECTIONAL_CHARACTER, visual)
         directional_donor.visible = false
@@ -350,7 +350,7 @@ func model_bounds(root: Node3D) -> AABB:
     var first := true
     for child in root.find_children("*", "MeshInstance3D", true, false):
         var mesh_node := child as MeshInstance3D
-        if mesh_node.mesh == null:
+        if str(mesh_node.name).to_lower().begins_with("wardrobe") or mesh_node.mesh == null:
             continue
         var local := root.global_transform.affine_inverse() * mesh_node.global_transform
         var bounds: AABB = local * mesh_node.get_aabb()
@@ -582,7 +582,7 @@ func refresh_wardrobe_ui() -> void:
 func choose_wardrobe(slot: String,id: String) -> void:
     if wardrobe.choose(slot,id):
         if secondary_collision != null:
-            secondary_collision.skirt_enabled = wardrobe.selected["bottom"] != "trousers"
+            secondary_collision.set_outfit(str(wardrobe.selected["top"]), str(wardrobe.selected["bottom"]))
         refresh_wardrobe_ui()
         save_game()
 
@@ -1138,6 +1138,35 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     print("WARDROBE_SMOKE_PASS")
+    # No clothing-dependent skeleton scaling or clip preparation.
+    var body_bounds := model_bounds(avatar_model)
+    var original_scale := avatar_model.scale
+    if not wardrobe.choose("top","hoodie") or not wardrobe.choose("bottom","trousers"):
+        push_error("Hoodie/trousers selection failed")
+        get_tree().quit(1)
+        return
+    secondary_collision.set_outfit("hoodie","trousers")
+    if secondary_collision.skirt_enabled or not secondary_collision.hoodie_enabled or secondary_collision.hoodie_samples.size() < 12 or secondary_collision.hoodie_sleeve_profiles.size() != 2 or secondary_collision.sleeve_colliders().size() < 2:
+        push_error("Outfit-specific collision cache missing")
+        get_tree().quit(1)
+        return
+    if not model_bounds(avatar_model).is_equal_approx(body_bounds) or not avatar_model.scale.is_equal_approx(original_scale) or not wardrobe.consistent():
+        push_error("Outfit changed avatar scale or body coverage visibility")
+        get_tree().quit(1)
+        return
+    if wardrobe.trouser_body.skin == null or wardrobe.trouser_body.get_node_or_null(wardrobe.trouser_body.skeleton) != retargeter.target:
+        push_error("Masked body does not share the original skeleton")
+        get_tree().quit(1)
+        return
+    secondary_collision.tick(1.0/60.0,natural_gait,false)
+    for side in ["left","right"]:
+        if float(secondary_collision.hoodie_arm_offset[side]) > deg_to_rad(8.01):
+            push_error("Hoodie arm contact exceeded angle budget")
+            get_tree().quit(1)
+            return
+    wardrobe.restore({})
+    secondary_collision.set_outfit("original","original")
+    print("WARDROBE_FIT_SMOKE_PASS")
     # Verify directions classify distinctly and authored clips actually
     # animate the target's thigh. No rendering-dependent assertions.
     var smoke_thigh: int = retargeter.target_keys["leftUpperLeg"]

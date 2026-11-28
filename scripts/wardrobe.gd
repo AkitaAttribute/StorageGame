@@ -7,7 +7,8 @@ const CATALOG := {
 const FUTURE_SLOTS := ["arm","hand","face","leg","feet"]
 var selected: Dictionary = {"top":"original","bottom":"original"}
 var variants: Dictionary = {}
-var originals: Dictionary = {"top": [], "bottom": [], "neck": []}
+var originals: Dictionary = {"top": [], "bottom": [], "neck": [], "skin": []}
+var trouser_body: MeshInstance3D
 var hidden_material: ShaderMaterial
 var ready := false
 
@@ -25,6 +26,10 @@ func setup(avatar: Node3D) -> void:
             if mat == null:
                 continue
             var name := mat.resource_name.to_lower()
+            if name.contains("wardrobebodytrousersskin"):
+                trouser_body = mesh_node
+                mesh_node.hide()
+                continue
             var variant := ""
             for key in ["topuniform","tophoodie","bottomuniform","bottomtrousers"]:
                 if name.contains("wardrobe"+key):
@@ -41,9 +46,11 @@ func setup(avatar: Node3D) -> void:
                 slot = "bottom"
             elif name.contains("_accessoryneck_"):
                 slot = "neck"
+            elif name.contains("_body_") and name.contains("_skin"):
+                slot = "skin"
             if not slot.is_empty():
                 originals[slot].append({"node":mesh_node,"index":i})
-    ready = variants.size()==4 and not originals["top"].is_empty() and not originals["bottom"].is_empty()
+    ready = variants.size()==4 and is_instance_valid(trouser_body) and not originals["skin"].is_empty() and not originals["top"].is_empty() and not originals["bottom"].is_empty()
     print("WARDROBE_READY ",ready," variants=",variants.keys()," originals=",originals.keys())
     apply()
 
@@ -80,8 +87,18 @@ func apply() -> void:
     show_original("top",selected["top"]=="original")
     show_original("bottom",selected["bottom"]=="original")
     show_original("neck",selected["top"]!="hoodie")
+    var pants := selected["bottom"] == "trousers" and is_instance_valid(trouser_body)
+    show_original("skin",not pants)
+    if is_instance_valid(trouser_body):
+        trouser_body.visible = pants
 
 func consistent() -> bool:
+    if not is_instance_valid(trouser_body) or trouser_body.visible != (selected["bottom"] == "trousers"):
+        return false
+    for entry in originals["skin"]:
+        var node: MeshInstance3D = entry["node"]
+        if (node.get_surface_override_material(int(entry["index"])) != null) != (selected["bottom"] == "trousers"):
+            return false
     for key in variants:
         var node: MeshInstance3D = variants[key]
         if node.visible != (key == "top"+str(selected["top"]) or key == "bottom"+str(selected["bottom"])):

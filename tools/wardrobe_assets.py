@@ -124,7 +124,7 @@ def add_wardrobe(doc, raw_bin, cache):
         # The donor mesh shares the original Body skin and parent transform.
         # No extra skeleton or duplicate avatar is imported.
         mesh=len(doc["meshes"])
-        doc["meshes"].append({"name":name,"primitives":[prim]})
+        doc["meshes"].append({"name":name,"primitives":prim if isinstance(prim,list) else [prim]})
         node=copy.deepcopy(base)
         node.pop("children",None)
         node.pop("weights",None)
@@ -149,6 +149,29 @@ def add_wardrobe(doc, raw_bin, cache):
         p.pop("targets",None)
         p["material"]=material(d,srcbuf,garment(d,donor,category)["material"],name)
         add_mesh(name,p)
+    def smooth(a,b,x):
+        t=max(0.,min(1.,(x-a)/(b-a)))
+        return t*t*(3.-2.*t)
+    hips=target_rest[target_joint[target_human["hips"]]][12:15]
+    leg_centers={}
+    for side in ("left","right"):
+        leg_centers[side]=[target_rest[target_joint[target_human[side+k]]][12:15]
+                           for k in ("UpperLeg","LowerLeg","Foot")]
+    def trouser_ease(v):
+        x,y,z=v
+        side=min(leg_centers,key=lambda k:abs(x-leg_centers[k][0][0]))
+        a,b,c=leg_centers[side]
+        hi,lo=(a,b) if y>=b[1] else (b,c)
+        t=max(0.,min(1.,(hi[1]-y)/max(.001,hi[1]-lo[1])))
+        cx=hi[0]+(lo[0]-hi[0])*t
+        cz=hi[2]+(lo[2]-hi[2])*t
+        waist=smooth(hips[1]-.19,hips[1]-.065,y)
+        cx=cx*(1.-waist)+hips[0]*waist
+        cz=cz*(1.-waist)+hips[2]*waist
+        ease=1.06+.08*waist
+        return (cx+(x-cx)*ease,y+.023*smooth(hips[1]-.10,hips[1]+.065,y),
+                cz+(z-cz)*ease)
+
     # Different geometry: transfer the original weighted hoodie/trouser
     # vertices onto Shino's skin using the matching humanoid bind matrices.
     d,srcbuf=source(cache,"HairSample_Male.vrm")
@@ -186,7 +209,8 @@ def add_wardrobe(doc, raw_bin, cache):
                 k=mapping[j]
                 local=point(donor_bind[j],pos[v])
                 # Narrow the male cut moderately while retaining fabric ease.
-                local=(local[0]*0.90,local[1],local[2]*0.90)
+                if category=="Tops":
+                    local=(local[0]*0.90,local[1],local[2]*0.90)
                 fitted=point(target_rest[k],local)
                 for a in range(3):result[a]+=fitted[a]*w
                 total+=w
@@ -194,7 +218,8 @@ def add_wardrobe(doc, raw_bin, cache):
             if total<1e-6:raise RuntimeError("Unweighted garment vertex")
             pairs=sorted(combined.items(),key=lambda x:-x[1])[:4]
             norm=sum(w for _,w in pairs)
-            out_pos.append(tuple(x/total for x in result))
+            fitted=tuple(x/total for x in result)
+            out_pos.append(trouser_ease(fitted) if category=="Bottoms" else fitted)
             out_joints.append(tuple([j for j,w in pairs]+[0]*(4-len(pairs))))
             out_weights.append(tuple([w/norm for j,w in pairs]+[0.]*(4-len(pairs))))
         if len(selected)<100:raise RuntimeError("Garment geometry unexpectedly small")
@@ -209,6 +234,45 @@ def add_wardrobe(doc, raw_bin, cache):
         add_mesh(name,q)
         print("WARDROBE_GEOMETRY",name,len(selected),"vertices",len(indexes)//3,"triangles",
               "bounds",q["attributes"]["POSITION"],doc["accessors"][q["attributes"]["POSITION"]]["min"],doc["accessors"][q["attributes"]["POSITION"]]["max"])
+    # Opaque trousers cover the original underwear/legs. Do not alter the
+    # avatar skeleton or shrink its skin. Build an indexed skin substitute
+    # with only the covered triangles removed; keep torso, hands and feet.
+    # The cutoff comes from the fitted garment, not the source male body.
+    waist=max(v[1] for v in out_pos)-.032
+    cuff=min(v[1] for v in out_pos)+.038
+    kept_primitives=[]
+    removed=0
+    retained=0
+    for prim in doc["meshes"][base["mesh"]]["primitives"]:
+        mat=doc["materials"][prim["material"]]
+        if "_Body_" not in mat.get("name","") or "_SKIN" not in mat.get("name",""):
+            continue
+        pos=read(doc,buf,prim["attributes"]["POSITION"])
+        ids=[v[0] for v in read(doc,buf,prim["indices"])]
+        kept=[]
+        for i in range(0,len(ids),3):
+            tri=ids[i:i+3]
+            center=[sum(pos[k][j] for k in tri)/3. for j in range(3)]
+            # A small transition overlap hides the seam underneath the waist
+            # and shoes. The rest of the body keeps its original vertices.
+            if cuff < center[1] < waist and abs(center[0]) < .30:
+                removed+=1
+            else:
+                kept.extend(tri)
+                retained+=1
+        if not kept:continue
+        q=copy.deepcopy(prim)
+        q.pop("targets",None)
+        q["indices"]=accessor([(i,) for i in kept],"SCALAR",5125,34963)
+        skinmat=copy.deepcopy(mat)
+        skinmat["name"]="WardrobeBodyTrousersSkin"+str(len(kept_primitives))
+        q["material"]=len(doc["materials"])
+        doc["materials"].append(skinmat)
+        kept_primitives.append(q)
+    if removed<100 or retained<100 or not kept_primitives:
+        raise RuntimeError("Trouser body coverage mask invalid")
+    add_mesh("WardrobeBodyTrousers",kept_primitives)
+    print("WARDROBE_TROUSER_MASK", "removed",removed,"retained",retained,"waist",waist,"cuff",cuff)
     buf.extend(b"\0"*((-len(buf))%4))
     doc["buffers"][0]["byteLength"]=len(buf)
     return struct.pack("<II",len(buf),0x004E4942)+buf
