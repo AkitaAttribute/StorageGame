@@ -977,6 +977,32 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     print("ORIGINAL_HAIR_CONTACT_PASS")
+    var sleeve_volumes := secondary_collision.sleeve_colliders()
+    if sleeve_volumes.size() != 2:
+        push_error("Both sleeve collision profiles are required")
+        get_tree().quit(1)
+        return
+    for side in ["left", "right"]:
+        var profile: Dictionary = secondary_collision.sleeve_profiles[side]
+        if int(profile["samples"]) < 8 or float(profile["radius"]) < 0.045 or float(profile["radius"]) > 0.105:
+            push_error("Sleeve envelope not measured from avatar mesh: " + side)
+            get_tree().quit(1)
+            return
+    var sleeve_center: Vector3 = (sleeve_volumes[0][0] + sleeve_volumes[0][1]) * 0.5
+    var sleeve_radius: float = sleeve_volumes[0][2]
+    var sleeve_axis: Vector3 = (sleeve_volumes[0][1] - sleeve_volumes[0][0]).normalized()
+    var radial := sleeve_axis.cross(Vector3.BACK).normalized()
+    if radial.length_squared() < 0.001:
+        radial = sleeve_axis.cross(Vector3.RIGHT).normalized()
+    var sleeve_inside := sleeve_center + radial * (sleeve_radius - 0.015)
+    var sleeve_outside := sleeve_center + radial * (sleeve_radius + 0.06)
+    var sleeve_hit: Vector3 = secondary_collision.sleeve_link_goal(sleeve_outside, sleeve_inside, [sleeve_volumes[0]])
+    var sleeve_clear: Vector3 = secondary_collision.sleeve_link_goal(sleeve_outside + radial * 0.03, sleeve_outside, [sleeve_volumes[0]])
+    if sleeve_hit.distance_to(sleeve_inside) < 0.009 or not sleeve_clear.is_equal_approx(sleeve_outside):
+        push_error("Local sleeve hair contact or non-contact isolation failed")
+        get_tree().quit(1)
+        return
+    print("LOCAL_SLEEVE_CONTACT_PASS")
     # Verify directions classify distinctly and authored clips actually
     # animate the target's thigh. No rendering-dependent assertions.
     var smoke_thigh: int = retargeter.target_keys["leftUpperLeg"]
