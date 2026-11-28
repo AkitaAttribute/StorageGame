@@ -87,7 +87,7 @@ func apply() -> void:
     show_original("top",selected["top"]=="original")
     show_original("bottom",selected["bottom"]=="original")
     show_original("neck",selected["top"]!="hoodie")
-    var pants := selected["bottom"] == "trousers" and is_instance_valid(trouser_body)
+    var pants: bool = selected["bottom"] == "trousers" and is_instance_valid(trouser_body)
     show_original("skin",not pants)
     if is_instance_valid(trouser_body):
         trouser_body.visible = pants
