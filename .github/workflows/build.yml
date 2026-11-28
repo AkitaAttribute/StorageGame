@@ -132,6 +132,29 @@ jobs:
           grep -F STORAGE_SMOKE_PASS /tmp/storage-smoke.log
           if grep -E 'SCRIPT ERROR:|Parse Error:|Compile Error:|ERROR:' /tmp/storage-smoke.log; then exit 1; fi
 
+      - name: Render wardrobe verification views
+        shell: bash
+        run: |
+          set -euo pipefail
+          export XDG_DATA_HOME="$(mktemp -d)"
+          timeout 90s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 godot --path . --resolution 960x540 -- --wardrobe-visual 2>&1 | tee /tmp/wardrobe-visual.log
+          grep -F WARDROBE_VISUAL_PASS /tmp/wardrobe-visual.log
+          test "$(find /tmp/storage-wardrobe-visual -name '*.png' | wc -l)" -eq 16
+          python3 - <<'PY'
+          import base64
+          from pathlib import Path
+          for p in sorted(Path("/tmp/storage-wardrobe-visual").glob("*.png")):
+              print("WARDROBE_RENDER",p.name,base64.b64encode(p.read_bytes()).decode())
+          PY
+
+      - name: Upload wardrobe verification views
+        uses: actions/upload-artifact@v4
+        with:
+          name: Wardrobe-visual-${{ github.sha }}
+          path: /tmp/storage-wardrobe-visual/*.png
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Export Windows executable
         shell: bash
         run: |

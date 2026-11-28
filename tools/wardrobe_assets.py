@@ -166,8 +166,8 @@ def add_wardrobe(doc, raw_bin, cache):
     skirt_pts=[v for tri in skirt_tri for v in tri]
     shirt_hem=min(v[1] for v in torso_top)
     skirt_waist=max(v[1] for v in skirt_pts)
-    pants_waist=shirt_hem+.045
-    hoodie_hem=skirt_waist-.018
+    pants_waist=shirt_hem+.085
+    hoodie_hem=skirt_waist-.050
     print("WARDROBE_SEAMS", "shirt_hem",shirt_hem,"skirt_waist",skirt_waist,
           "pants_waist",pants_waist,"hoodie_hem",hoodie_hem)
     if not (.65<shirt_hem<1.15 and .65<skirt_waist<1.15):
@@ -254,7 +254,7 @@ def add_wardrobe(doc, raw_bin, cache):
                 local=point(donor_bind[j],pos[v])
                 # Narrow the male cut moderately while retaining fabric ease.
                 if category=="Tops":
-                    local=(local[0]*0.90,local[1],local[2]*0.90)
+                    local=(local[0]*0.97,local[1],local[2]*0.97)
                 fitted=point(target_rest[k],local)
                 for a in range(3):result[a]+=fitted[a]*w
                 total+=w
@@ -300,70 +300,33 @@ def add_wardrobe(doc, raw_bin, cache):
             pants_tri=[tuple(out_pos[remap[k]] for k in indexes[i:i+3]) for i in range(0,len(indexes),3)]
             pants_positions=list(out_pos)
         else:
-            # Shorten only torso-weighted hem, leaving sleeves and upper
-            # hoodie intact. The hem rests OVER the upper skirt/waistband.
-            torso_joint={target_joint[target_human[k]] for k in ("hips","spine","chest","upperChest","neck") if k in target_human}
-            torso_ids=[i for i,v in enumerate(out_pos) if abs(v[0]-hips[0])<.24 and sum(w for j,w in zip(out_joints[i],out_weights[i]) if j in torso_joint)>.55]
-            old_hem=min(out_pos[i][1] for i in torso_ids)
-            for i in torso_ids:
-                x,y,z=out_pos[i]
-                amount=1.-smooth(old_hem,old_hem+.22,y)
-                y+=max(0.,hoodie_hem-old_hem)*amount
-                dx,dz=x-hips[0],z-hips[2]
-                radius=math.hypot(dx,dz)
-                if radius>1e-6 and y<max(skirt_waist,pants_waist)+.06:
-                    # The same top can fit over either bottom. Use the
-                    # larger local section only at the actual hem overlap.
-                    outer=max(section_radius(skirt_tri,y,dx/radius,dz/radius),
-                              section_radius(pants_tri,y,dx/radius,dz/radius))
-                    if outer>0:
-                        new_radius=max(radius,outer+.014)
-                        x,z=hips[0]+dx/radius*new_radius,hips[2]+dz/radius*new_radius
-                    pin_waist(i,(1.-smooth(hoodie_hem,hoodie_hem+.13,y))*.85)
-                out_pos[i]=(x,y,z)
-            print("WARDROBE_HOODIE_HEM",old_hem,"->",min(out_pos[i][1] for i in torso_ids))
-        # Validate actual fitted seam samples, rather than just the mesh
-        # visibility flags. Only compare cross sections where both layers exist.
-        tests=0
-        bad=0
-        min_gap=1.
-        for i,(x,y,z) in enumerate(out_pos):
-            dx,dz=x-hips[0],z-hips[2]
-            radius=math.hypot(dx,dz)
-            if radius<.025 or radius>.25:continue
-            if category=="Bottoms" and y>=shirt_hem+.014:
-                outer=section_radius(top_tri,y,dx/radius,dz/radius)
-                gap=outer-radius
-            elif category=="Tops" and i in torso_ids and y<=max(skirt_waist,pants_waist):
-                outer=max(section_radius(skirt_tri,y,dx/radius,dz/radius),
-                          section_radius(pants_tri,y,dx/radius,dz/radius))
-                gap=radius-outer
-            else:continue
-            if outer<=0:continue
-            tests+=1
-            min_gap=min(min_gap,gap)
-            bad+=gap<.004
-        print("WARDROBE_LAYER_CHECK",name,"samples",tests,"bad",bad,"min_gap",min_gap)
-        if tests<8 or bad:
-            raise RuntimeError("Garment seam clearance failed: "+name)
-        # Recalculate normals after the seam deformation; preserve smoothing
-        # across coincident UV seam vertices by sharing their normal sum.
-        sums={}
-        for i in range(0,len(indexes),3):
-            ids=[remap[k] for k in indexes[i:i+3]]
-            a,b,c=[out_pos[k] for k in ids]
-            ab=[b[j]-a[j] for j in range(3)]
-            ac=[c[j]-a[j] for j in range(3)]
-            normal=(ab[1]*ac[2]-ab[2]*ac[1],ab[2]*ac[0]-ab[0]*ac[2],ab[0]*ac[1]-ab[1]*ac[0])
-            for k in ids:
-                key=tuple(round(v,6) for v in out_pos[k])
-                total=sums.setdefault(key,[0.,0.,0.])
-                for j in range(3):total[j]+=normal[j]
-        out_normals=[]
-        for i,v in enumerate(out_pos):
-            normal=sums[tuple(round(k,6) for k in v)]
-            length=math.sqrt(sum(k*k for k in normal))
-            out_normals.append(tuple(k/length for k in normal) if length>1e-9 else normals[selected[i]])
+            # Preserve the full donor hoodie for trousers. The prior
+            # per-vertex hem fit shortened only some neighboring vertices,
+            # and its cubic easing could reverse the vertical derivative.
+            # A separate skirt cut is generated below from this same mesh.
+            hoodie_positions=list(out_pos)
+            hoodie_joints=list(out_joints)
+            hoodie_weights=list(out_weights)
+        # Preserve the donor normal orientation; rebuild deformed normals
+        # from the mesh without merging unrelated coincident vertices.
+        def fitted_normals(positions):
+            sums=[[0.,0.,0.] for _ in positions]
+            for k in range(0,len(indexes),3):
+                ids=[remap[v] for v in indexes[k:k+3]]
+                a,b,c=[positions[v] for v in ids]
+                ab=[b[j]-a[j] for j in range(3)]
+                ac=[c[j]-a[j] for j in range(3)]
+                normal=(ab[1]*ac[2]-ab[2]*ac[1],ab[2]*ac[0]-ab[0]*ac[2],ab[0]*ac[1]-ab[1]*ac[0])
+                for v in ids:
+                    original=normals[selected[v]]
+                    sign=1. if sum(x*z for x,z in zip(original,normal))>=0 else -1.
+                    for j in range(3):sums[v][j]+=sign*normal[j]
+            result=[]
+            for i,normal in enumerate(sums):
+                length=math.sqrt(sum(v*v for v in normal))
+                result.append(tuple(v/length for v in normal) if length>1e-9 else normals[selected[i]])
+            return result
+        out_normals=fitted_normals(out_pos) if category=="Bottoms" else [normals[v] for v in selected]
         q={"attributes":{
             "POSITION":accessor(out_pos,"VEC3",5126,34962),
             "NORMAL":accessor(out_normals,"VEC3",5126,34962),
@@ -373,47 +336,126 @@ def add_wardrobe(doc, raw_bin, cache):
             "indices":accessor([(remap[i],) for i in indexes],"SCALAR",5125,34963),
             "material":material(d,srcbuf,p["material"],name),"mode":4}
         add_mesh(name,q)
+        if category=="Tops":
+            # A continuous, monotonic mapping for the entire lower torso.
+            # The skirt cut ends just below its waistband; the trousers
+            # version retains the longer, original donor silhouette.
+            low=min(v[1] for v in out_pos if abs(v[0]-hips[0])<.24)
+            high=max(1.22,hoodie_hem+.18)
+            ratio=(high-hoodie_hem)/(high-low)
+            if not 0.25<ratio<=1.0:
+                raise RuntimeError("Unexpected hoodie skirt hem mapping")
+            def mapped_y(y):
+                if y>=high:return y
+                t=max(0.,(y-low)/(high-low))
+                # Cubic Hermite with positive derivative; no foldback.
+                m0=min(.2,ratio)
+                m1=min(1.,3.*ratio-m0)
+                return ((2*t**3-3*t*t+1)*hoodie_hem+(t**3-2*t*t+t)*(high-low)*m0
+                        +(-2*t**3+3*t*t)*high+(t**3-t*t)*(high-low)*m1)
+            prev=mapped_y(low)
+            for i in range(1,101):
+                value=mapped_y(low+(high-low)*i/100.)
+                if value<=prev:raise RuntimeError("Nonmonotonic hoodie hem fit")
+                prev=value
+            skirt_hoodie=[]
+            for x,y,z in out_pos:
+                lateral=1.-smooth(.23,.34,abs(x-hips[0]))
+                skirt_hoodie.append((x,y+(mapped_y(y)-y)*lateral,z))
+            # Uniformly fit the whole hem ring to the widest overlapping
+            # skirt section, not individual vertices (which caused spikes).
+            required=1.
+            count=0
+            for x,y,z in skirt_hoodie:
+                dx,dz=x-hips[0],z-hips[2]
+                rad=math.hypot(dx,dz)
+                if y>skirt_waist+.012 or y<hoodie_hem-.005 or rad<.035 or rad>.26:continue
+                outer=section_radius(skirt_tri,y,dx/rad,dz/rad)
+                if outer>0:
+                    required=max(required,(outer+.018)/rad)
+                    count+=1
+            if count<8 or required>1.65:
+                raise RuntimeError("Unexpected skirt hoodie hem envelope")
+            ring_scale=max(1.06,required)
+            for i,(x,y,z) in enumerate(skirt_hoodie):
+                band=(1.-smooth(skirt_waist+.012,high,y))*(1.-smooth(.23,.34,abs(x-hips[0])))
+                factor=1.+(ring_scale-1.)*band
+                skirt_hoodie[i]=(hips[0]+(x-hips[0])*factor,y,hips[2]+(z-hips[2])*factor)
+                # Uniform pelvis weighting across the complete overlap band,
+                # taper gradually above it; no disjoint vertex selection.
+                pin_waist(i,(1.-smooth(skirt_waist+.012,high,y))*(1.-smooth(.23,.34,abs(x-hips[0])))*.90)
+            short=copy.deepcopy(q)
+            short["attributes"]["POSITION"]=accessor(skirt_hoodie,"VEC3",5126,34962)
+            short["attributes"]["NORMAL"]=accessor(fitted_normals(skirt_hoodie),"VEC3",5126,34962)
+            short["attributes"]["JOINTS_0"]=accessor(out_joints,"VEC4",5123,34962)
+            short["attributes"]["WEIGHTS_0"]=accessor(out_weights,"VEC4",5126,34962)
+            mat=copy.deepcopy(doc["materials"][q["material"]])
+            mat["name"]="WardrobeTopHoodieSkirt"
+            short["material"]=len(doc["materials"])
+            doc["materials"].append(mat)
+            add_mesh("WardrobeTopHoodieSkirt",short)
+            print("WARDROBE_MONOTONIC_HEM",low,hoodie_hem,high,"ring_scale",ring_scale,"sections",count)
         print("WARDROBE_GEOMETRY",name,len(selected),"vertices",len(indexes)//3,"triangles",
               "bounds",q["attributes"]["POSITION"],doc["accessors"][q["attributes"]["POSITION"]]["min"],doc["accessors"][q["attributes"]["POSITION"]]["max"])
-    # Opaque trousers cover the original underwear/legs. Do not alter the
-    # avatar skeleton or shrink its skin. Build an indexed skin substitute
-    # with only the covered triangles removed; keep torso, hands and feet.
-    # The cutoff comes from the fitted garment, not the source male body.
-    waist=max(v[1] for v in pants_positions)-.020
+    # Physically separate original skirt and body skin from the multi-
+    # surface body, so visibility is node-level, not fragment discard.
+    original=doc["meshes"][base["mesh"]]["primitives"]
+    skin_prims=[v for v in original if "_Body_" in doc["materials"][v["material"]].get("name","") and "_SKIN" in doc["materials"][v["material"]].get("name","")]
+    skirt_prim=garment(doc,base,"Bottoms")
+    def split_original(name,prims):
+        copied=copy.deepcopy(prims)
+        for prim in copied:prim.pop("targets",None)
+        add_mesh(name,copied)
+    split_original("OriginalSkirt",[skirt_prim])
+    split_original("OriginalSkin",skin_prims)
+    doc["meshes"][base["mesh"]]["primitives"]=[v for v in original if v not in skin_prims and v is not skirt_prim]
+    # Three coverage masks: trousers, hoodie with skirt, and both. Hide
+    # only covered triangles; keep head/neck, hands and exposed lower leg.
+    # The physical body underneath is never reshaped or rescaled.
+    waist=max(v[1] for v in pants_positions)-.010
     cuff=min(v[1] for v in pants_positions)+.025
-    kept_primitives=[]
-    removed=0
-    retained=0
-    for prim in doc["meshes"][base["mesh"]]["primitives"]:
-        mat=doc["materials"][prim["material"]]
-        if "_Body_" not in mat.get("name","") or "_SKIN" not in mat.get("name",""):
-            continue
-        pos=read(doc,buf,prim["attributes"]["POSITION"])
-        ids=[v[0] for v in read(doc,buf,prim["indices"])]
-        kept=[]
-        for i in range(0,len(ids),3):
-            tri=ids[i:i+3]
-            center=[sum(pos[k][j] for k in tri)/3. for j in range(3)]
-            # A small transition overlap hides the seam underneath the waist
-            # and shoes. The rest of the body keeps its original vertices.
-            if cuff < center[1] < waist and abs(center[0]) < .30:
-                removed+=1
-            else:
-                kept.extend(tri)
-                retained+=1
-        if not kept:continue
-        q=copy.deepcopy(prim)
-        q.pop("targets",None)
-        q["indices"]=accessor([(i,) for i in kept],"SCALAR",5125,34963)
-        skinmat=copy.deepcopy(mat)
-        skinmat["name"]="WardrobeBodyTrousersSkin"+str(len(kept_primitives))
-        q["material"]=len(doc["materials"])
-        doc["materials"].append(skinmat)
-        kept_primitives.append(q)
-    if removed<100 or retained<100 or not kept_primitives:
-        raise RuntimeError("Trouser body coverage mask invalid")
-    add_mesh("WardrobeBodyTrousers",kept_primitives)
-    print("WARDROBE_TROUSER_MASK", "removed",removed,"retained",retained,"waist",waist,"cuff",cuff)
+    neck_y=target_rest[target_joint[target_human["neck"]]][13]
+    hand_x=min(abs(target_rest[target_joint[target_human[side+"Hand"]]][12]-hips[0]) for side in ("left","right"))
+    arm_joints={target_joint[target_human[side+k]] for side in ("left","right") for k in ("UpperArm","LowerArm","Shoulder")}
+    for mask,pants,hood in [("Trousers",True,False),("Hoodie",False,True),("Both",True,True)]:
+        kept_primitives=[]
+        removed=retained=0
+        hood_bottom=(min(v[1] for v in hoodie_positions if abs(v[0]-hips[0])<.24)+.035) if pants else hoodie_hem+.020
+        for prim in skin_prims:
+            mat=doc["materials"][prim["material"]]
+            attrs=prim["attributes"]
+            pos=read(doc,buf,attrs["POSITION"])
+            joints=read(doc,buf,attrs["JOINTS_0"])
+            weights=read(doc,buf,attrs["WEIGHTS_0"])
+            ids=[v[0] for v in read(doc,buf,prim["indices"])]
+            kept=[]
+            for i in range(0,len(ids),3):
+                tri=ids[i:i+3]
+                center=[sum(pos[k][j] for k in tri)/3. for j in range(3)]
+                x,y,z=center
+                covered=pants and cuff<y<waist and abs(x-hips[0])<.30
+                if hood:
+                    arm=sum(w for k in tri for j,w in zip(joints[k],weights[k]) if j in arm_joints)/3.
+                    torso=hood_bottom<y<neck_y-.035 and abs(x-hips[0])<.24
+                    sleeve=arm>.60 and abs(x-hips[0])<hand_x-.025 and y>hood_bottom
+                    covered=covered or torso or sleeve
+                if covered:removed+=1
+                else:
+                    kept.extend(tri)
+                    retained+=1
+            if not kept:continue
+            q=copy.deepcopy(prim)
+            q.pop("targets",None)
+            q["indices"]=accessor([(i,) for i in kept],"SCALAR",5125,34963)
+            skinmat=copy.deepcopy(mat)
+            skinmat["name"]="WardrobeBody"+mask+"Skin"+str(len(kept_primitives))
+            q["material"]=len(doc["materials"])
+            doc["materials"].append(skinmat)
+            kept_primitives.append(q)
+        if removed<100 or retained<100 or not kept_primitives:
+            raise RuntimeError("Invalid coverage mask "+mask)
+        add_mesh("WardrobeBody"+mask,kept_primitives)
+        print("WARDROBE_BODY_MASK",mask,"removed",removed,"retained",retained,"waist",waist,"hood_bottom",hood_bottom)
     buf.extend(b"\0"*((-len(buf))%4))
     doc["buffers"][0]["byteLength"]=len(buf)
     return struct.pack("<II",len(buf),0x004E4942)+buf

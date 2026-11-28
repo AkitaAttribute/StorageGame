@@ -140,7 +140,7 @@ func measure_sleeves(avatar: Node3D, hoodie: bool = false) -> void:
         for node in avatar.find_children("*", "MeshInstance3D", true, false):
             var mesh_node := node as MeshInstance3D
             var node_name := str(mesh_node.name).to_lower()
-            if hoodie and not node_name.begins_with("wardrobetophoodie"):
+            if hoodie and node_name != "wardrobetophoodie":
                 continue
             if not hoodie and node_name.begins_with("wardrobe"):
                 continue
@@ -200,12 +200,9 @@ func sleeve_colliders() -> Array:
         var shoulder := at(side + "UpperArm")
         var elbow := at(side + "LowerArm")
         var radius: float = profiles[side]["radius"]
-        result.append([shoulder.lerp(elbow, 0.06), shoulder.lerp(elbow, 0.60 if hoodie_enabled else 0.30), radius])
-    if hoodie_enabled and hoodie_back_radius > 0.0:
-        var chest := at("chest")
-        var neck := at("neck")
-        # Short upper-back hood proxy only; no expansion of the whole torso.
-        result.append([chest.lerp(neck, 0.35) + Vector3(0,0,-0.035), neck + Vector3(0,0,-0.035), hoodie_back_radius])
+        if hoodie_enabled:
+            radius = minf(radius,float(sleeve_profiles[side]["radius"])+0.012)
+        result.append([shoulder.lerp(elbow, 0.06), shoulder.lerp(elbow, 0.30), radius])
     return result
 
 # Only a contacting link gets displaced. Preserve the original torso
@@ -240,7 +237,7 @@ func cache_hoodie(avatar: Node3D) -> void:
     var back_depth := 0.0
     for node in avatar.find_children("*","MeshInstance3D",true,false):
         var mesh_node := node as MeshInstance3D
-        if not str(mesh_node.name).to_lower().begins_with("wardrobetophoodie") or mesh_node.mesh == null or mesh_node.skin == null:
+        if str(mesh_node.name).to_lower() != "wardrobetophoodie" or mesh_node.mesh == null or mesh_node.skin == null:
             continue
         var skin := mesh_node.skin
         var binds: Dictionary = {}
@@ -353,6 +350,25 @@ func solve_hoodie_arms(delta: float, gait: RefCounted, holding: bool, held_side:
         var offset := minf(budget,lerpf(float(hoodie_arm_offset[side]),desired,1.0-exp(-delta*12.0)))
         hoodie_arm_offset[side] = offset
         gait.abduct_chain(side,sign_side,offset)
+
+# The hood is behind the neck, not a spherical obstruction that pushes
+# every strand sideways. Use a short, directional upper-back contact;
+# only rear strands near the fabric are moved, and by at most 15 mm.
+func hood_hair_goal(point: Vector3) -> Vector3:
+    if not hoodie_enabled or hoodie_back_radius <= 0.0:
+        return point
+    var chest := at("chest")
+    var neck := at("neck")
+    var t := clampf((point.y-chest.y)/maxf(0.001,neck.y-chest.y),0.0,1.0)
+    var center := chest.lerp(neck,t)
+    var local := point-center
+    if local.z >= -0.035 or absf(local.x)>=0.115 or point.y<chest.y-0.025 or point.y>neck.y+0.025:
+        return point
+    var lateral := 1.0-smoothstep(0.065,0.115,absf(local.x))
+    var vertical := smoothstep(chest.y-0.025,chest.y+0.035,point.y)*(1.0-smoothstep(neck.y-0.015,neck.y+0.025,point.y))
+    var back := hoodie_back_radius+0.020
+    var correction := clampf(back+local.z,0.0,0.015)*lateral*vertical
+    return point-Vector3(0,0,correction)
 
 func skirt_surface() -> PackedVector3Array:
     var result := PackedVector3Array()
@@ -558,6 +574,7 @@ func tick(delta: float, gait: RefCounted = null, holding: bool = false, held_sid
                     goal = outside_capsule(goal, volume[0], volume[1], float(volume[2]), preferred)
                 if kind == "HAIR":
                     goal = sleeve_link_goal(start, goal, sleeves)
+                    goal = hood_hair_goal(goal)
                 if goal.distance_squared_to(end) < 0.000001:
                     continue
                 # Fixed segment lengths, bounded rotations, no bone scaling.

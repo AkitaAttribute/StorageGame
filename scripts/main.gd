@@ -101,6 +101,8 @@ func _ready() -> void:
     show_menu()
     if "--storage-smoke" in OS.get_cmdline_user_args():
         call_deferred("_smoke")
+    elif "--wardrobe-visual" in OS.get_cmdline_user_args():
+        call_deferred("_wardrobe_visual")
 
 func show_menu() -> void:
     var canvas := CanvasLayer.new()
@@ -1154,6 +1156,18 @@ func _smoke() -> void:
         push_error("Outfit changed avatar scale or body coverage visibility")
         get_tree().quit(1)
         return
+    for entry in wardrobe.originals["bottom"]:
+        var original_skirt: MeshInstance3D = entry["node"]
+        if original_skirt.visible or not str(original_skirt.name).to_lower().begins_with("originalskirt"):
+            push_error("Original skirt was not physically disabled for trousers")
+            get_tree().quit(1)
+            return
+    for part in [wardrobe.hoodie_skirt,wardrobe.hoodie_body,wardrobe.both_body]:
+        var piece := part as MeshInstance3D
+        if piece.skin == null or piece.get_node_or_null(piece.skeleton) != retargeter.target:
+            push_error("Outfit-specific geometry does not share skeleton")
+            get_tree().quit(1)
+            return
     if wardrobe.trouser_body.skin == null or wardrobe.trouser_body.get_node_or_null(wardrobe.trouser_body.skeleton) != retargeter.target:
         push_error("Masked body does not share the original skeleton")
         get_tree().quit(1)
@@ -1854,4 +1868,54 @@ func _smoke() -> void:
         get_tree().quit(1)
         return
     print("STORAGE_SMOKE_PASS")
+    get_tree().quit()
+
+# Real rendered pose capture, separate from headless smoke tests.
+func _wardrobe_visual() -> void:
+    start_game(Saves.new_slot())
+    await get_tree().process_frame
+    if not avatar_ready or wardrobe == null or not wardrobe.ready:
+        get_tree().quit(1)
+        return
+    set_physics_process(false)
+    set_process(false)
+    hud.hide()
+    var output := "/tmp/storage-wardrobe-visual"
+    DirAccess.make_dir_recursive_absolute(output)
+    camera.fov = 37.0
+    var focus := visual.global_position + Vector3(0,1.03,0)
+    var combinations := [["original","trousers"],["hoodie","trousers"],["hoodie","original"],["original","original"]]
+    for outfit in combinations:
+        var top_id: String = outfit[0]
+        var bottom_id: String = outfit[1]
+        wardrobe.choose("top",top_id)
+        wardrobe.choose("bottom",bottom_id)
+        secondary_collision.set_outfit(top_id,bottom_id)
+        for pose in ["idle","walk"]:
+            var clip: StringName = idle if pose == "idle" else walk
+            animator.play(clip)
+            animator.seek(animator.get_animation(clip).length*0.30,true)
+            for frame in range(30):
+                retargeter.apply_pose()
+                natural_gait.limit_torso(0.0 if pose == "idle" else 1.0)
+                natural_gait.keep_arms_clear(1.0/60.0,0.0 if pose == "idle" else SPEED,false,pose,0.30)
+                secondary_collision.tick(1.0/60.0,natural_gait,false)
+            for view in ["front","back"]:
+                var offset := Vector3(0.25,-0.10,2.65 if view == "front" else -2.65)
+                camera.global_position = focus+visual.global_transform.basis*offset
+                camera.look_at(focus,Vector3.UP)
+                await get_tree().process_frame
+                await RenderingServer.frame_post_draw
+                var frame_image := get_viewport().get_texture().get_image()
+                if frame_image == null or frame_image.is_empty():
+                    get_tree().quit(1)
+                    return
+                var width := frame_image.get_width()
+                var height := frame_image.get_height()
+                var cropped := frame_image.get_region(Rect2i(int(width*0.30),0,int(width*0.40),height))
+                var filename := output.path_join(top_id+"_"+bottom_id+"_"+pose+"_"+view+".png")
+                if cropped.save_png(filename) != OK:
+                    get_tree().quit(1)
+                    return
+    print("WARDROBE_VISUAL_PASS")
     get_tree().quit()
